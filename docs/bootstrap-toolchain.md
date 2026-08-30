@@ -30,13 +30,18 @@ the pipeline can't build its own tooling image, and the digest is both an input
 (referenced by every Task) and an output (of the build). Flow:
 
 1. **Phase 0** — `bootstrap.sh` builds `pipeline-utils` out-of-cluster with the
-   host `crane` from a pinned base + the pinned tool binaries + `scripts/`,
-   pushes it to zot, captures the resulting digest.
+   host `crane` from a pinned base + the pinned tool binaries + `scripts/`, then
+   `docker load`s it into the OrbStack image store (no registry in Slice 1;
+   `crane push` to zot from Slice 3), and captures the resulting digest.
 2. **Phase 1** — write that digest into `digests.cue`
    (`pipelineUtils: "sha256:..."`), run `scripts/gen-digests.sh`, commit.
 3. **CI drift check** — recompute a content hash of the image inputs (base
    digest + tool versions + `scripts/` tree hash). If it changes and
    `digests.cue`'s `pipelineUtils` was not updated in the same commit, fail.
+
+Contents (Slice 1): `bash`, `git`, `crane`, `cue`, the `docker` CLI, and
+`scripts/` at `/opt/cv/scripts/`. `trivy` is added at Slice 3, `cosign` at
+Slice 4.
 
 ## In-cluster CRD schemas for `scripts/validate.sh`
 

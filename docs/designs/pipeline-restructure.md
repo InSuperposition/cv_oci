@@ -186,6 +186,23 @@ deployment model requires an in-process compiler. Slice 2 evaluates **Option C**
 (snapshot the browser asset graph to static files, serve via `staticFiles`, drop
 request-time bundling).
 
+### No in-cluster registry in Slice 1 (revises 2a-A / "zot in Slice 1")
+
+OrbStack's k8s pulls images through the OrbStack Docker daemon, which cannot
+resolve `*.svc.cluster.local` and requires HTTPS-or-`insecure-registries` for
+every pull (verified 2026-08-30 — see `docs/runbook.md`). Standing up an
+in-cluster registry with a trust path is real OrbStack-specific work that buys
+the tracer bullet nothing.
+
+Instead: `assemble` builds the image as an OCI tarball with `crane` (no daemon,
+no Dockerfile) and `docker load`s it into the OrbStack image store; `deploy` runs
+it **by digest** with `imagePullPolicy: Never`. OrbStack's k8s reads the host
+Docker image store directly (verified). **zot and the registry-trust story move
+to Slice 3**, where the CVE gate genuinely needs a running registry. The one
+compromise — the `docker load` step touches `/var/run/docker.sock` — is the
+daemon as an image cache, not a builder; recorded in `docs/debt.md` with the
+upgrade trigger "replace with `crane push` at Slice 3".
+
 ### Task graph
 
 ```
@@ -198,66 +215,76 @@ request-time bundling).
              + assert the cv_frontend contract paths exist (docs/frontend-contract.md)
              + echo APP_SHA, SOURCE_DATE_EPOCH = git commit timestamp
                         ▼
-   build    ── npm ci --omit=dev  → npm audit signatures → npm run typecheck
-             → npm test  → produce release tree into the workspace
-             → assert-release-tree.sh (server.ts, app/, node_modules/remix,
-               package.json present; no typescript/@types; above floor size;
-               df preflight on the workspace PVC)
+   build    ── npm ci (full) → npm audit signatures → npm run typecheck → npm test
+             → npm ci --omit=dev (prune) → produce release tree into the workspace
+               (server.ts, tsconfig.json, app/, public/, package.json,
+                package-lock.json, node_modules/ — NO *.test.*, NO hmr.ts)
+             → assert-release-tree.sh (entrypoint + prod deps present; no
+               typescript/@types; no *.test.*; above floor size; df preflight)
                         ▼
    [ workspace: volumeClaimTemplate — one PVC per PipelineRun, auto-GC ]
                         ▼
    assemble ── workspace read-only
              → crane append release layer onto pinned
-               gcr.io/distroless/nodejs24-debian12@sha256:… (from digests.cue)
+               gcr.io/distroless/nodejs24-debian12@sha256:… (from digests.cue),
+               -o /workspace/cv.tar  (a docker-loadable tarball; NO daemon)
              → set config: USER nonroot, WORKDIR /app, ENV PORT,
                entrypoint node, CMD ["--import","remix/node-tsx","server.ts"]
-             → crane push  zot.<ns>.svc/cv:git-<full-sha>-<cv_oci-defn-id>
-             → PLATFORM_IMAGE_DIGEST
+             → IMAGE_DIGEST = crane digest --tarball /workspace/cv.tar
+             → docker load -i /workspace/cv.tar  (via /var/run/docker.sock;
+               daemon as cache only — see debt.md)
                         ▼
    smoke    ── temp Deployment + ClusterIP Service (run-scoped names, unique ns)
+             image cv@sha256:<IMAGE_DIGEST>, imagePullPolicy: Never
              → a curl Job hits /healthz through the Service → expect 200
              → teardown ALWAYS (trap + ttlSecondsAfterFinished + pipeline finally)
                         ▼
-   deploy   ── apply Deployment  image: zot.<ns>.svc/cv@sha256:<PLATFORM_IMAGE_DIGEST>
-             (consume the Task result — never re-resolve the tag)
+   deploy   ── apply Deployment  image: cv@sha256:<IMAGE_DIGEST>,
+             imagePullPolicy: Never  (consume the Task result, never a tag)
              → kubectl rollout status --timeout
              → probe /healthz through the Service
              → write the current-digest pointer ConfigMap (digest + APP_SHA + PipelineRun)
 ```
 
+`npm run typecheck` needs the `typescript` devDep, so the full `npm ci` runs
+before the `--omit=dev` prune (see `docs/assignment-findings.md`).
+
 ### Slice 1 also delivers
 
-- **`pipeline-utils` image:** one pinned OCI image (`sh`, `git`, `crane`, `cue`,
-  `trivy`, `cosign` + the `scripts/` baked at a known path). Built **once
-  out-of-cluster by `bootstrap.sh`** and pushed to zot by digest (the pipeline
-  can't build its own tooling image — chicken-egg). Tasks reference it by digest.
-  arm64-only for now (multi-arch is a TODO). Two-phase digest flow: build →
-  capture digest → write into `digests.cue`; CI content-hashes the image inputs
-  and fails on a stale recorded digest.
-- **`bootstrap.sh`** — ordered, `--wait`-gated, idempotent: CRDs
-  (`--for=condition=Established`) → Tekton controllers (`--for=condition=Available`)
-  → enable resolver feature flags → CA Secret + zot cert → zot Deployment/Service/PVC
-  → NetworkPolicy scoping zot to the pipeline namespace → build+push `pipeline-utils`
-  → Pipeline/Tasks/RBAC/single ServiceAccount. Order documented in the runbook.
-- **In-cluster zot** with a self-signed cert from a plain openssl CA Secret (not
-  cert-manager — Rule 15). Unauthenticated for Slices 1-5, plus the NetworkPolicy.
+- **`pipeline-utils` image:** one pinned OCI image (`bash`, `git`, `crane`,
+  `cue`, `docker` CLI, plus `scripts/` baked at a known path). Built **once
+  out-of-cluster by `bootstrap.sh`** with the host `crane` and `docker load`ed
+  into the OrbStack store (the pipeline can't build its own tooling image —
+  chicken-egg). Tasks reference it by digest. arm64-only for now (multi-arch is
+  a TODO). Two-phase digest flow: build → capture digest → write into
+  `digests.cue`; CI content-hashes the image inputs and fails on a stale
+  recorded digest. `trivy` / `cosign` are added to this image at Slices 3 / 4.
+- **`bootstrap.sh`** — ordered, `--wait`-gated, idempotent: pinned host-toolchain
+  check → Tekton Pipelines CRDs (`--for=condition=Established`) → Tekton
+  controllers (`--for=condition=Available`) → enable the git-resolver feature
+  flag → the `cv-pipeline` namespace + RBAC + single ServiceAccount → build +
+  `docker load` `pipeline-utils`. No registry, no CA, no NetworkPolicy in Slice
+  1. Order documented in the runbook.
 - **Single ServiceAccount** for the whole pipeline (split in Slice 1.5).
-  `automountServiceAccountToken: false` on build/assemble/smoke.
+  `automountServiceAccountToken: false` on build/assemble/smoke; `deploy` needs
+  the K8s API. `assemble` mounts `/var/run/docker.sock` (hostPath) for the
+  `docker load` step — the only privileged mount in Slice 1, removed at Slice 3.
 - **`docs/frontend-contract.md`** — every assumption the pipeline makes about
   `cv_frontend`'s layout, asserted by the `resolve` Task.
 - **`scripts/`** (in `pipeline-utils`): `resolve-sha.sh`, `assert-release-tree.sh`,
   `smoke.sh`, `deploy.sh`, `bootstrap.sh`, `lib/log.sh`.
 - **Tests:** bats unit tests for every script (git fixture served by a tiny
   in-cluster git-http Deployment; one labelled `@network` test for the real
-  pinned SHA). Four negative pipeline tests: bad `APP_SHA`; degenerate release
-  tree; `/healthz` != 200 (+ teardown runs); zot unreachable.
-  `scripts/test/e2e.sh` — runs the real pipeline against live OrbStack with a
-  pinned fixture `APP_SHA`, unique per-run namespace + zot repo prefix, selects
-  resources by PipelineRun UID, captures PipelineRun YAML + Task logs + events
-  before teardown, asserts: PipelineRun success; cloned HEAD == `APP_SHA`;
-  Task-result digest exists in zot; Deployment + running Pod `imageID` match that
-  digest; `kubectl get deploy -o yaml` shows `@sha256`, no tag; cleanup runs
-  after a forced failure; deletes the per-run zot repo + GC.
+  pinned SHA). Three negative pipeline tests: bad `APP_SHA`; degenerate release
+  tree; `/healthz` != 200 (+ teardown runs). (The "registry unreachable" test
+  returns at Slice 3.) `scripts/test/e2e.sh` — runs the real pipeline against
+  live OrbStack with a pinned fixture `APP_SHA`, unique per-run namespace,
+  selects resources by PipelineRun UID, captures PipelineRun YAML + Task logs +
+  events before teardown, asserts: PipelineRun success; cloned HEAD ==
+  `APP_SHA`; `crane digest --tarball` matches the Task result; the image is in
+  the OrbStack store; Deployment + running Pod `imageID` match that digest;
+  `kubectl get deploy -o yaml` shows `@sha256`, no tag; cleanup runs after a
+  forced failure.
 - **Rollback** (`docs/runbook.md`): `kubectl rollout undo` / `set image
   ...@<prev>` (prev from `kubectl rollout history`). The current-digest ConfigMap
   is the human-readable pointer; the durable audit trail is the signed provenance
@@ -300,8 +327,19 @@ digests, or the exact nondeterminism source is recorded.
 
 ---
 
-## Slice 3 — CVE gate + SBOM
+## Slice 3 — zot + CVE gate + SBOM
 
+- **In-cluster zot** (deferred from Slice 1). Deployment + Service + PVC. On
+  OrbStack the pull-trust path is: zot reachable at an address the OrbStack
+  Docker daemon can resolve + one `insecure-registries` entry via
+  `orb config docker` (plain HTTP — a self-signed CA needs the same node edit
+  and protects nothing new on a solo cluster; revisit at Slice 6 with authz).
+  This is the documented per-platform node step (`docs/runbook.md`); a portable
+  cluster substitutes its own registry ingress + trust config.
+- `assemble` changes: `crane push` to zot instead of `docker load`; drop the
+  `/var/run/docker.sock` mount. `deploy` pulls from zot by digest.
+- NetworkPolicy scoping zot to the `cv-pipeline` namespace.
+- Restore the "registry unreachable" negative pipeline test.
 - zot config: enable Trivy scan + search extensions.
 - **CVE gate** = "policy as of now": fail on a currently-*fixable* CRITICAL. No
   baseline ledger. The Trivy scanner image + DB snapshot digest are pinned per

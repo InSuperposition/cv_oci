@@ -34,6 +34,26 @@ One entry per failure mode, added by the slice that introduces it. Format:
 - **Fix:** address the finding. `git commit --no-verify` only for a genuine
   emergency, and fix it in the next commit.
 
+### OrbStack image-pull facts (why Slice 1 has no registry)
+
+Verified 2026-08-30 on OrbStack k8s `v1.35.6+orb1` (runtime `docker://29.4.0`):
+
+- Image pulls go through the **OrbStack Docker daemon** (cri-dockerd).
+- That daemon **cannot resolve `*.svc.cluster.local`** — it uses OrbStack DNS
+  (`0.250.250.200`) and times out. A ClusterIP `.svc` registry name is unusable
+  for kubelet pulls.
+- It requires **HTTPS** unless the registry is in `insecure-registries`
+  (`~/.orbstack/config/docker.json`, edited via `orb config docker` — restarts
+  the docker engine, not the whole VM).
+- **NodePort is not routed to the host** (`k8s.expose_services: false`);
+  enabling it needs a full `orb stop` / restart.
+- **OrbStack k8s reads the host Docker image store** — an image `docker load`ed
+  locally runs with `imagePullPolicy: Never`, no registry.
+- In-cluster pods reach ClusterIPs and `.svc` names fine.
+
+Slice 1 therefore uses `crane` → tarball → `docker load` → run by digest. zot and
+a real pull-trust path arrive at Slice 3.
+
 ### `cue vet digests.cue` fails with a constraint error
 
 - **Likely cause:** a digest value is not `sha256:` + 64 hex chars (a tag slipped

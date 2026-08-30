@@ -3,7 +3,10 @@
 params:
   - name: distrolessNode-digest
     type: string
-    default: "sha256:14d42e2511532589a7c7e01a753667a74fcc96266e137e8125006b87b0c32d0a"
+    default: "sha256:0d757b971ffc552eeb69e4f13b9223b36d79fb28ccb5425f33bf044dd7760b25"
+  - name: nodeBuild-digest
+    type: string
+    default: "sha256:e9b5516b06baeaea9a8e65a7aec6a85fbb960a30b52b66968f2c8092b3e2a3eb"
   - name: pipelineUtils-digest
     type: string
     default: "sha256:0e4012c8891c7b731dbb1be1f8a92e6269f0a6b08a280712a7f99e3e99c3f8c1"

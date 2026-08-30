@@ -9,6 +9,7 @@ anything exists in-cluster. Pin these; a version bump is a reviewed commit
 | Tool | Pinned version | Used for | Install |
 |---|---|---|---|
 | `cue` | v0.17.1 | `digests.cue` schema + `cue export` to `digests.env` / `params.yaml` | `brew install cue` / [releases](https://github.com/cue-lang/cue/releases) |
+| `gtar` (GNU tar) | 1.35 | deterministic image layers in `assemble-image.sh` (Mac: `brew install gnu-tar`; pipeline-utils ships GNU `tar`) | `brew install gnu-tar` |
 | `apko` | 1.2.41 | build the `pipeline-utils` image from Wolfi packages, no Dockerfile (`bootstrap/build-pipeline-utils.sh`) | `brew install apko` / [releases](https://github.com/chainguard-dev/apko/releases) |
 | `kubeconform` | v0.8.0 | offline Tekton/K8s YAML validation (`scripts/validate.sh`) | `brew install kubeconform` / [releases](https://github.com/yannh/kubeconform/releases) |
 | `kubectl` | v1.37.0 (client) | apply, `rollout status`, `--dry-run=server` (Slice 1+) | matches the OrbStack cluster minor |
@@ -16,7 +17,7 @@ anything exists in-cluster. Pin these; a version bump is a reviewed commit
 | `shellcheck` | 0.11.0 | pre-commit lint of `scripts/` | `brew install shellcheck` |
 | `bats` | 1.14.0 | `scripts/test/` unit tests | `brew install bats-core` |
 | `cosign` | (present — pin at first use) | verify Distroless base signature (Slice 1); `cosign verify` (Slice 4) | `brew install cosign` |
-| `crane` | **not yet installed** — needed for Slice 1 | OCI assembly, `pipeline-utils` build, `crane digest` | `brew install crane` / [go-containerregistry releases](https://github.com/google/go-containerregistry/releases) |
+| `crane` | 0.22.0 | OCI assembly, `pipeline-utils` build, `crane digest` | `brew install crane` / [go-containerregistry releases](https://github.com/google/go-containerregistry/releases) |
 | `jq` | 1.8.2 | JSONL task artifacts, scripting | `brew install jq` |
 | `yq` | v4.53.6 | YAML scripting | `brew install yq` |
 | `git` | 2.55.0 | everything | system |

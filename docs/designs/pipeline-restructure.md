@@ -215,7 +215,10 @@ upgrade trigger "replace with `crane push` at Slice 3".
              + assert the cv_frontend contract paths exist (docs/frontend-contract.md)
              + echo APP_SHA, SOURCE_DATE_EPOCH = git commit timestamp
                         ▼
-   build    ── npm ci (full) → npm audit signatures → npm run typecheck → npm test
+   build    ── image: node:24-bookworm-slim (debian/glibc, arm64 — MUST match
+               the distroless runtime's libc: the app's native deps ship
+               per-libc bindings, see docs/assignment-findings.md)
+             → npm ci (full) → npm audit signatures → npm run typecheck → npm test
              → npm ci --omit=dev (prune) → produce release tree into the workspace
                (server.ts, tsconfig.json, app/, public/, package.json,
                 package-lock.json, node_modules/ — NO *.test.*, NO hmr.ts)
@@ -224,26 +227,28 @@ upgrade trigger "replace with `crane push` at Slice 3".
                         ▼
    [ workspace: volumeClaimTemplate — one PVC per PipelineRun, auto-GC ]
                         ▼
-   assemble ── workspace read-only
-             → crane append release layer onto pinned
-               gcr.io/distroless/nodejs24-debian12@sha256:… (from digests.cue),
-               -o /workspace/cv.tar  (a docker-loadable tarball; NO daemon)
-             → set config: USER nonroot, WORKDIR /app, ENV PORT,
-               entrypoint node, CMD ["--import","remix/node-tsx","server.ts"]
-             → IMAGE_DIGEST = crane digest --tarball /workspace/cv.tar
-             → docker load -i /workspace/cv.tar  (via /var/run/docker.sock;
-               daemon as cache only — see debt.md)
+   assemble ── image: pipeline-utils (has crane + docker CLI)
+             → crane append release layer (rooted at /app) onto pinned
+               gcr.io/distroless/nodejs24-debian12@<arm64 child digest>
+             → crane mutate: WORKDIR /app, USER 65532, ENV PORT + NODE_ENV,
+               entrypoint /nodejs/bin/node, CMD --import remix/node-tsx server.ts
+               (append + mutate need a registry → an ephemeral in-process
+               `crane registry serve`, no persistent infra)
+             → IMAGE_DIGEST = crane digest --tarball
+             → docker load (via /var/run/docker.sock) as  cv:git-<full APP_SHA>
                         ▼
-   smoke    ── temp Deployment + ClusterIP Service (run-scoped names, unique ns)
-             image cv@sha256:<IMAGE_DIGEST>, imagePullPolicy: Never
-             → a curl Job hits /healthz through the Service → expect 200
+   smoke    ── temp Deployment + ClusterIP Service (run-scoped names)
+             image cv:git-<APP_SHA>, imagePullPolicy: Never
+             → curl /healthz through the Service → expect 200
              → teardown ALWAYS (trap + ttlSecondsAfterFinished + pipeline finally)
                         ▼
-   deploy   ── apply Deployment  image: cv@sha256:<IMAGE_DIGEST>,
-             imagePullPolicy: Never  (consume the Task result, never a tag)
+   deploy   ── apply Deployment  image: cv:git-<APP_SHA>, imagePullPolicy: Never
+             (OrbStack's docker load records no repo digest — the tag encodes
+             the full APP_SHA; IMAGE_DIGEST is recorded + e2e-verified, not
+             deployed. Real @sha256 deploy returns at Slice 3 — docs/debt.md)
              → kubectl rollout status --timeout
              → probe /healthz through the Service
-             → write the current-digest pointer ConfigMap (digest + APP_SHA + PipelineRun)
+             → write cv-deploy-state ConfigMap (tag + digest + APP_SHA + PipelineRun)
 ```
 
 `npm run typecheck` needs the `typescript` devDep, so the full `npm ci` runs

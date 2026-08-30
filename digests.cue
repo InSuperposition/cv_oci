@@ -25,11 +25,19 @@ images: [string]: #Pin
 
 images: {
 	// Slice 1
-	// gcr.io/distroless/nodejs24-debian12:nonroot — the runtime base
-	distrolessNode: "sha256:14d42e2511532589a7c7e01a753667a74fcc96266e137e8125006b87b0c32d0a"
+	// gcr.io/distroless/nodejs24-debian12:nonroot — the runtime base.
+	// This is the linux/arm64 CHILD digest (not the multi-arch index); Slice 1
+	// is arm64-only. Slice 5 makes the base arch-aware.
+	distrolessNode: "sha256:0d757b971ffc552eeb69e4f13b9223b36d79fb28ccb5425f33bf044dd7760b25"
 	// built out-of-cluster by bootstrap/build-pipeline-utils.sh (two-phase, see
 	// docs/bootstrap-toolchain.md). Rebuild + repin when apko.yaml or scripts/ change.
 	pipelineUtils: "sha256:0e4012c8891c7b731dbb1be1f8a92e6269f0a6b08a280712a7f99e3e99c3f8c1"
+
+	// docker.io/library/node:24-bookworm-slim — the build Task image. MUST be
+	// debian/glibc + arm64 to match the distroless runtime base: the app's
+	// native deps (oxc-transform, esbuild, lightningcss) ship per-libc bindings
+	// (linux-arm64-gnu), so `npm ci` runs here, not in the musl pipeline-utils.
+	nodeBuild: "sha256:e9b5516b06baeaea9a8e65a7aec6a85fbb960a30b52b66968f2c8092b3e2a3eb"
 
 	// Slice 3
 	trivyCli: ""

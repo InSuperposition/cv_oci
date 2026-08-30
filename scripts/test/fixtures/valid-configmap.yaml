@@ -1,0 +1,7 @@
+# Positive fixture for scripts/test/validate.bats — MUST pass kubeconform.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: valid
+data:
+  key: "value"

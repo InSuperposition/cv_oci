@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Pre-commit hook. Enable with:  git config core.hooksPath .githooks
+#
+# Runs, fast-to-slow:
+#   1. shellcheck on all scripts
+#   2. gen-digests drift check (digests.env / params.yaml match digests.cue)
+#   3. cue vet digests.cue
+#   4. kubeconform validation of manifests
+#   5. bats unit tests
+#
+# Bypass in a genuine emergency with `git commit --no-verify`, then fix it in
+# the next commit (docs/runbook.md).
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+fail=0
+step() { printf '\n[pre-commit] %s\n' "$1"; }
+
+if command -v shellcheck >/dev/null 2>&1; then
+	step "shellcheck"
+	mapfile -t sh < <(git ls-files -- 'scripts/*.sh' 'scripts/**/*.sh' '.githooks/*')
+	if [ "${#sh[@]}" -gt 0 ]; then
+		shellcheck -x "${sh[@]}" || fail=1
+	fi
+else
+	echo "  shellcheck not installed — skipping (docs/bootstrap-toolchain.md)"
+fi
+
+if command -v cue >/dev/null 2>&1; then
+	step "cue vet digests.cue"
+	cue vet ./digests.cue || fail=1
+
+	step "gen-digests drift check"
+	tmp="$(mktemp -d)"
+	trap 'rm -rf "$tmp"' EXIT
+	cp digests.env params.yaml "$tmp/" 2>/dev/null || true
+	scripts/gen-digests.sh >/dev/null
+	if ! diff -q "$tmp/digests.env" digests.env >/dev/null 2>&1 \
+	  || ! diff -q "$tmp/params.yaml" params.yaml >/dev/null 2>&1; then
+		echo "  digests.env / params.yaml are stale — run scripts/gen-digests.sh and stage them"
+		fail=1
+	fi
+else
+	echo "  cue not installed — skipping digest checks"
+fi
+
+step "validate.sh"
+scripts/validate.sh || fail=1
+
+if command -v bats >/dev/null 2>&1; then
+	step "bats"
+	bats scripts/test/ || fail=1
+else
+	echo "  bats not installed — skipping tests"
+fi
+
+if [ "$fail" -ne 0 ]; then
+	echo
+	echo "[pre-commit] FAILED — fix the above, or --no-verify for an emergency."
+	exit 1
+fi
+echo
+echo "[pre-commit] ok"

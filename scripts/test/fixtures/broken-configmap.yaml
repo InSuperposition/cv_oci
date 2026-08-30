@@ -1,0 +1,7 @@
+# Negative fixture for scripts/test/validate.bats — MUST fail kubeconform.
+# `data` must be a map of strings, not a scalar.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: broken
+data: "this-should-be-a-map"

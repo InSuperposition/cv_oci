@@ -15,3 +15,4 @@ each slice.
 | Registry-trust bootstrap is per-platform node config | Kubernetes treats registry trust as node/runtime config; unavoidable | — | documented caveat in the design doc, not "fixed" |
 | `pipeline-utils` image is arm64-only | OrbStack is the only cluster; multi-arch build is Slice 5's subject | the portability kind-CI or Slice 5 needs it on amd64 | TODOS.md: multi-arch pipeline-utils |
 | zot unauthenticated for Slices 1-5 (NetworkPolicy only) | full authz is real work; deploy-by-digest limits blast radius on a solo cluster | Slice 6 | Slice 6 → htpasswd / full authz |
+| `validate.sh` fetches the Kubernetes core schema set from a version-pinned URL, not a vendored copy | the full standalone set is hundreds of files; a pinned URL is reproducible enough for a local learning repo | validation needs to run offline / in air-gapped CI | vendor `schemas/k8s/v1.31.0/` |

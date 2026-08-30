@@ -138,10 +138,14 @@ Slice 5. Early releases are single-manifest. This doc says so.
 - `scripts/gen-digests.sh` — `cue export` `digests.cue` to a committed
   `digests.env` (sourced by scripts, `envsubst` on manifests) and a committed
   Tekton `params.yaml` (Task/Pipeline param defaults). CUE binary version pinned.
-- `scripts/validate.sh` — kubeconform over the repo's `*.yaml`, using pinned
-  Tekton + Kubernetes CRD schemas under `schemas/`. Exits 0 on an empty match set
-  (Slice 0 has no pipeline YAML yet), nonzero on any invalid file. Also lints for
-  hard-coded image tags/digests outside `digests.cue`.
+- `scripts/validate.sh` — kubeconform over the repo's tracked `*.yaml`. CRD
+  schemas: vendored locally under `schemas/` (Tekton lands in Slice 1); the
+  Kubernetes core schema set is pinned by version (`v1.31.0`) via a fixed
+  upstream URL rather than vendored wholesale (the full set is hundreds of files;
+  a version-pinned URL is reproducible enough for a local learning repo — see
+  `docs/debt.md`). Exits 0 on an empty match set (Slice 0 has no pipeline YAML
+  yet), nonzero on any invalid file. Also lints for hard-coded image
+  tags/digests outside `digests.cue`.
 - `scripts/lib/log.sh` — `log_kv key=value ...` and `die` helpers, sourced by
   every script.
 - `.githooks/pre-commit` + `git config core.hooksPath .githooks` — runs

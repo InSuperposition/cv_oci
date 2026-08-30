@@ -1,0 +1,56 @@
+# cv-assemble — build the runtime image with crane, load it into the OrbStack
+# store. No Dockerfile. Slice 1 only: the docker-load step mounts the node's
+# docker socket and runs as root (removed at Slice 3 when a real registry
+# replaces `docker load` — docs/debt.md).
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: cv-assemble
+spec:
+  params:
+    - { name: utils-image, type: string }
+    - { name: distroless-base, type: string }
+    - { name: app-sha, type: string }
+    - { name: source-date-epoch, type: string }
+  results:
+    - { name: image-tag, description: "cv:git-<app-sha>" }
+    - { name: image-digest, description: crane content digest (recorded, not deployed on OrbStack) }
+  workspaces:
+    - { name: shared }
+  volumes:
+    - name: docker-sock
+      hostPath: { path: /var/run/docker.sock, type: Socket }
+  steps:
+    - name: assert-tree
+      image: $(params.utils-image)
+      workingDir: $(workspaces.shared.path)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        cvoci/scripts/assert-release-tree.sh release/app
+    - name: assemble-and-load
+      image: $(params.utils-image)
+      workingDir: $(workspaces.shared.path)
+      # docker load needs the socket + root (sock is root:root 0660 in the node)
+      securityContext:
+        runAsUser: 0
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }
+      volumeMounts:
+        - { name: docker-sock, mountPath: /var/run/docker.sock }
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        TAG="cv:git-$(params.app-sha)"
+        DIGEST="$(SOURCE_DATE_EPOCH='$(params.source-date-epoch)' \
+          cvoci/scripts/assemble-image.sh release/app '$(params.distroless-base)' "$TAG")"
+        printf '%s' "$TAG" > "$(results.image-tag.path)"
+        printf '%s' "$DIGEST" > "$(results.image-digest.path)"
+        echo "assembled $TAG  $DIGEST"

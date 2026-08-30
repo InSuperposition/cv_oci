@@ -1,0 +1,73 @@
+# cv-slice1 — the tracer bullet: a running arm64 release deployed by digest.
+#
+# resolve -> build -> assemble -> smoke -> deploy, one shared PVC per run
+# (volumeClaimTemplate). A `finally` step tears down any smoke resources the
+# smoke Task didn't (belt-and-braces to smoke.sh's own trap).
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: cv-slice1
+spec:
+  params:
+    - { name: utils-image, type: string }
+    - { name: build-image, type: string }
+    - { name: distroless-base, type: string }
+    - { name: frontend-repo, type: string }
+    - { name: frontend-ref, type: string, default: main }
+    - { name: oci-repo, type: string }
+    - { name: oci-ref, type: string, default: main }
+    - { name: namespace, type: string, default: cv-pipeline }
+  workspaces:
+    - { name: shared }
+  tasks:
+    - name: resolve
+      taskRef: { name: cv-resolve }
+      workspaces: [{ name: shared, workspace: shared }]
+      params:
+        - { name: utils-image, value: $(params.utils-image) }
+        - { name: frontend-repo, value: $(params.frontend-repo) }
+        - { name: frontend-ref, value: $(params.frontend-ref) }
+        - { name: oci-repo, value: $(params.oci-repo) }
+        - { name: oci-ref, value: $(params.oci-ref) }
+    - name: build
+      runAfter: [resolve]
+      taskRef: { name: cv-build }
+      workspaces: [{ name: shared, workspace: shared }]
+      params:
+        - { name: build-image, value: $(params.build-image) }
+    - name: assemble
+      runAfter: [build]
+      taskRef: { name: cv-assemble }
+      workspaces: [{ name: shared, workspace: shared }]
+      params:
+        - { name: utils-image, value: $(params.utils-image) }
+        - { name: distroless-base, value: $(params.distroless-base) }
+        - { name: app-sha, value: $(tasks.resolve.results.app-sha) }
+        - { name: source-date-epoch, value: $(tasks.resolve.results.source-date-epoch) }
+    - name: smoke
+      runAfter: [assemble]
+      taskRef: { name: cv-smoke }
+      workspaces: [{ name: shared, workspace: shared }]
+      params:
+        - { name: utils-image, value: $(params.utils-image) }
+        - { name: image-tag, value: $(tasks.assemble.results.image-tag) }
+        - { name: namespace, value: $(params.namespace) }
+        - { name: run-id, value: $(context.pipelineRun.name) }
+    - name: deploy
+      runAfter: [smoke]
+      taskRef: { name: cv-deploy }
+      workspaces: [{ name: shared, workspace: shared }]
+      params:
+        - { name: utils-image, value: $(params.utils-image) }
+        - { name: image-tag, value: $(tasks.assemble.results.image-tag) }
+        - { name: image-digest, value: $(tasks.assemble.results.image-digest) }
+        - { name: app-sha, value: $(tasks.resolve.results.app-sha) }
+        - { name: namespace, value: $(params.namespace) }
+        - { name: pipelinerun, value: $(context.pipelineRun.name) }
+  finally:
+    - name: smoke-teardown
+      taskRef: { name: cv-smoke-teardown }
+      params:
+        - { name: utils-image, value: $(params.utils-image) }
+        - { name: namespace, value: $(params.namespace) }
+        - { name: run-id, value: $(context.pipelineRun.name) }

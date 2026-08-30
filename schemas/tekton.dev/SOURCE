@@ -1,0 +1,4 @@
+Tekton v1 CRD schemas extracted from a live Tekton Pipelines v1.15.1 install
+(vendor/tekton/pipeline-v1.15.1.yaml):
+  kubectl get crd <plural>.tekton.dev -o json | jq '.spec.versions[]|select(.name=="v1")|.schema.openAPIV3Schema'
+Regenerate after a Tekton version bump.

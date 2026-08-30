@@ -1,0 +1,27 @@
+# cv-smoke-teardown — pipeline `finally` backstop to smoke.sh's own trap.
+# Deletes any run-scoped smoke resources left behind (e.g. if the smoke Task
+# pod was killed before its trap ran).
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: cv-smoke-teardown
+spec:
+  params:
+    - { name: utils-image, type: string }
+    - { name: namespace, type: string }
+    - { name: run-id, type: string }
+  steps:
+    - name: teardown
+      image: $(params.utils-image)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        kubectl -n "$(params.namespace)" delete deploy,svc \
+          -l "cv-oci/smoke=$(params.run-id)" --ignore-not-found --wait=false
+        echo "smoke-teardown: cleared cv-oci/smoke=$(params.run-id)"

@@ -1,0 +1,31 @@
+# cv-deploy — deploy the release, verify it serves, record the pointer.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: cv-deploy
+spec:
+  params:
+    - { name: utils-image, type: string }
+    - { name: image-tag, type: string }
+    - { name: image-digest, type: string }
+    - { name: app-sha, type: string }
+    - { name: namespace, type: string }
+    - { name: pipelinerun, type: string }
+  workspaces:
+    - { name: shared }
+  steps:
+    - name: deploy
+      image: $(params.utils-image)
+      workingDir: $(workspaces.shared.path)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        cvoci/scripts/deploy.sh \
+          "$(params.image-tag)" "$(params.image-digest)" \
+          "$(params.namespace)" "$(params.app-sha)" "$(params.pipelinerun)"

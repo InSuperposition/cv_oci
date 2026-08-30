@@ -9,6 +9,7 @@ anything exists in-cluster. Pin these; a version bump is a reviewed commit
 | Tool | Pinned version | Used for | Install |
 |---|---|---|---|
 | `cue` | v0.17.1 | `digests.cue` schema + `cue export` to `digests.env` / `params.yaml` | `brew install cue` / [releases](https://github.com/cue-lang/cue/releases) |
+| `apko` | 1.2.41 | build the `pipeline-utils` image from Wolfi packages, no Dockerfile (`bootstrap/build-pipeline-utils.sh`) | `brew install apko` / [releases](https://github.com/chainguard-dev/apko/releases) |
 | `kubeconform` | v0.8.0 | offline Tekton/K8s YAML validation (`scripts/validate.sh`) | `brew install kubeconform` / [releases](https://github.com/yannh/kubeconform/releases) |
 | `kubectl` | v1.37.0 (client) | apply, `rollout status`, `--dry-run=server` (Slice 1+) | matches the OrbStack cluster minor |
 | `tkn` | 0.46.0 | `tkn pipeline start`, `tkn pipelinerun logs` | `brew install tektoncd-cli` |

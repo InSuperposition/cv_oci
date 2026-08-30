@@ -12,6 +12,7 @@ source "$ROOT/scripts/lib/log.sh"
 # tool | pinned version | version-probe command
 rows=(
 	"cue|v0.17.1|cue version | awk '/^cue version/{print \$3}'"
+	"apko|1.2.41|apko version 2>/dev/null | awk '/GitVersion/{print \$2}'"
 	"kubeconform|v0.8.0|kubeconform -v"
 	"kubectl|v1.37.0|kubectl version --client -o json | jq -r .clientVersion.gitVersion"
 	"tkn|0.46.0|tkn version --client 2>/dev/null | awk '/Client/{print \$NF}'"

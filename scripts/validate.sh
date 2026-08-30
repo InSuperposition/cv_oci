@@ -35,11 +35,12 @@ LOCAL_LOC="schemas/{{ .Group }}/{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.js
 if [ "$#" -gt 0 ]; then
 	files=("$@")
 else
-	# Tracked manifests only. Excludes: vendored schemas, negative-test
-	# fixtures, and generated non-manifest YAML (params.yaml).
+	# Our own tracked manifests only. Excludes: vendored schemas + upstream
+	# manifests, negative-test fixtures, apko config, and generated
+	# non-manifest YAML.
 	mapfile -t files < <(
 		git ls-files -- '*.yaml' '*.yml' \
-		| grep -Ev '^(schemas/|scripts/test/fixtures/|params\.yaml$)' || true
+		| grep -Ev '^(schemas/|vendor/|scripts/test/fixtures/|bootstrap/pipeline-utils/|params\.yaml$)' || true
 	)
 fi
 

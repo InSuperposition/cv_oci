@@ -1,0 +1,43 @@
+# Slice 1: one ServiceAccount for the whole pipeline. Split into least-privilege
+# per-stage SAs in Slice 1.5 (design doc).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cv-pipeline-sa
+  namespace: cv-pipeline
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cv-pipeline-role
+  namespace: cv-pipeline
+rules:
+  # smoke + deploy Tasks: manage the app Deployment/Service and the
+  # run-scoped smoke resources; read pod status + logs; the current-digest
+  # pointer ConfigMap (1e-A).
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cv-pipeline-rolebinding
+  namespace: cv-pipeline
+subjects:
+  - kind: ServiceAccount
+    name: cv-pipeline-sa
+    namespace: cv-pipeline
+roleRef:
+  kind: Role
+  name: cv-pipeline-role
+  apiGroup: rbac.authorization.k8s.io

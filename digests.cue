@@ -25,9 +25,11 @@ images: [string]: #Pin
 
 images: {
 	// Slice 1
-	distrolessNode: "" // gcr.io/distroless/nodejs24-debian12:nonroot
-	craneCli:       "" // gcr.io/go-containerregistry/crane
-	pipelineUtils:  "" // built out-of-cluster by bootstrap.sh, two-phase
+	// gcr.io/distroless/nodejs24-debian12:nonroot — the runtime base
+	distrolessNode: "sha256:14d42e2511532589a7c7e01a753667a74fcc96266e137e8125006b87b0c32d0a"
+	// built out-of-cluster by bootstrap/build-pipeline-utils.sh (two-phase, see
+	// docs/bootstrap-toolchain.md). Rebuild + repin when apko.yaml or scripts/ change.
+	pipelineUtils: "sha256:0e4012c8891c7b731dbb1be1f8a92e6269f0a6b08a280712a7f99e3e99c3f8c1"
 
 	// Slice 3
 	trivyCli: ""

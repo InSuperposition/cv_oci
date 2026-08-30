@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# editor / tooling caches
+.clj-kondo/.cache/
+.lsp/.cache/
+
+# local secrets — never commit (Slice 1 generates the zot CA here)
+/bootstrap/ca/*.key
+/bootstrap/ca/*.pem
+/secrets/
+
+# test artifacts (e2e evidence dumps)
+/scripts/test/_artifacts/
+
+# generated at apply time only if ever run outside the committed flow
+*.tmp

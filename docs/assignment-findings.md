@@ -5,6 +5,11 @@ Run 2026-08-30 against `cv_frontend` @ `0bbc684` (`remix@3.0.0-beta.10`, Node
 `npm ci --omit=dev`, run `NODE_ENV=production node --import remix/node-tsx
 server.ts`, hit `/`, `/healthz`, and asset URLs, watch for runtime disk writes.
 
+Follow-up: `cv_frontend` @ `d7f14b7` then added `/healthz`, a `node:test` router
+test, and the production `fingerprint: { buildId: APP_SHA }` config. Re-verified
+there — `/healthz` 200 in 8ms, assets served as `entry.@<hash>.ts`. The findings
+below are unchanged.
+
 ## Answers
 
 ### Does a compiler run at request time?

@@ -5,8 +5,9 @@ The `resolve` Task asserts the **paths** section against the checked-out
 `APP_SHA` and fails loud if anything is missing (finding 1c-A). Bump this doc in
 the same commit that bumps the pinned `APP_SHA` when it changes.
 
-Verified against `cv_frontend` @ `0bbc684` on 2026-08-30. See
-`docs/assignment-findings.md` for the runtime investigation behind these.
+Verified against `cv_frontend` @ `d7f14b7` on 2026-08-30 (the `/healthz` +
+fingerprint + router-test commit; the runtime investigation in
+`docs/assignment-findings.md` was against its parent `0bbc684` and still holds).
 
 ## Repo identity
 
@@ -14,8 +15,9 @@ Verified against `cv_frontend` @ `0bbc684` on 2026-08-30. See
 - `app_revision` is a **full 40-hex commit SHA** (branches/tags are resolved to
   one before build — `resolve` Task).
 - Each `cv_oci` commit pins a known-good `cv_frontend` fixture SHA in
-  `digests.cue` (`frontendFixture`) so acceptance is meaningful at any checkout
-  (finding codex #13). _Added when the fixture is chosen in Slice 1._
+  `digests.cue` (`frontend.fixtureSha`) so acceptance is meaningful at any
+  checkout (finding codex #13). Currently
+  `d7f14b797ac83dd618040e65c4a65196eba37b9a`.
 
 ## Paths that MUST exist at APP_SHA (asserted by `resolve`)
 

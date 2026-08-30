@@ -9,8 +9,17 @@
 // docs/bootstrap-toolchain.md for the two-phase pipelineUtils flow.
 package digests
 
-#Digest: =~"^sha256:[0-9a-f]{64}$"
-#Pin:    #Digest | ""
+#Digest:  =~"^sha256:[0-9a-f]{64}$"
+#Pin:     #Digest | ""
+#GitSha:  =~"^[0-9a-f]{40}$"
+
+// cv_frontend pin. Each cv_oci commit pins a known-good cv_frontend commit so
+// acceptance (`npm test`, the e2e) is meaningful at any checkout (codex #13).
+frontend: {
+	repo:       "https://github.com/InSuperposition/cv_frontend"
+	fixtureSha: #GitSha | ""
+}
+frontend: fixtureSha: "d7f14b797ac83dd618040e65c4a65196eba37b9a"
 
 images: [string]: #Pin
 

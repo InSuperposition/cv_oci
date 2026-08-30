@@ -256,47 +256,72 @@ before the `--omit=dev` prune (see `docs/assignment-findings.md`).
 
 ### Slice 1 also delivers
 
-- **`pipeline-utils` image:** one pinned OCI image (`bash`, `git`, `crane`,
-  `cue`, `docker` CLI, plus `scripts/` baked at a known path). Built **once
-  out-of-cluster by `bootstrap.sh`** with the host `crane` and `docker load`ed
-  into the OrbStack store (the pipeline can't build its own tooling image —
-  chicken-egg). Tasks reference it by digest. arm64-only for now (multi-arch is
-  a TODO). Two-phase digest flow: build → capture digest → write into
-  `digests.cue`; CI content-hashes the image inputs and fails on a stale
-  recorded digest. `trivy` / `cosign` are added to this image at Slices 3 / 4.
-- **`bootstrap.sh`** — ordered, `--wait`-gated, idempotent: pinned host-toolchain
-  check → Tekton Pipelines CRDs (`--for=condition=Established`) → Tekton
-  controllers (`--for=condition=Available`) → enable the git-resolver feature
-  flag → the `cv-pipeline` namespace + RBAC + single ServiceAccount → build +
-  `docker load` `pipeline-utils`. No registry, no CA, no NetworkPolicy in Slice
-  1. Order documented in the runbook.
-- **Single ServiceAccount** for the whole pipeline (split in Slice 1.5).
-  `automountServiceAccountToken: false` on build/assemble/smoke; `deploy` needs
-  the K8s API. `assemble` mounts `/var/run/docker.sock` (hostPath) for the
-  `docker load` step — the only privileged mount in Slice 1, removed at Slice 3.
+- **`pipeline-utils` image:** one image every Task runs in, built with `apko`
+  from a pinned Wolfi package set (`bootstrap/pipeline-utils/apko.yaml` +
+  `apko.lock.json`): `bash git curl jq coreutils grep sed gawk findutils gnutar
+  crane cue docker-cli kubectl-1.35 nodejs-24 npm`. No Dockerfile, no
+  daemon-build. `bootstrap/build-pipeline-utils.sh` apko-builds it and
+  `docker load`s it into the OrbStack store as `cv/pipeline-utils:slice1-arm64`
+  (the pipeline can't build its own tooling image — chicken-egg); Tasks
+  reference that tag. arm64-only for now (multi-arch is a TODO). Two-phase
+  digest flow: build → capture digest → write `images.pipelineUtils` in
+  `digests.cue`; `build-pipeline-utils.sh --check` fails on drift. `trivy` /
+  `cosign` are added at Slices 3 / 4. Scripts are NOT in the image — they come
+  from the workspace `cv_oci` clone.
+- **`bootstrap/bootstrap.sh`** — ordered, `--wait`-gated, idempotent: host-
+  toolchain check → Tekton Pipelines v1.15.1 (vendored + checksum-pinned), wait
+  CRDs Established + controller/webhook/resolvers Available → verify the git
+  resolver is on (default in v1.15.1) → `cv-pipeline` namespace + RBAC + single
+  ServiceAccount → build + `docker load` `pipeline-utils`. No registry, CA, or
+  NetworkPolicy in Slice 1. `~30s` on a fresh cluster; re-run is a no-op.
+- **`tasks/` + `pipeline/pipeline.yaml`** applied into `cv-pipeline` (and into
+  the throwaway namespace by `e2e.sh` / `negative.sh`). Every Task runs in
+  `pipeline-utils` except `build` (`node:24-bookworm-slim`). All steps
+  `runAsNonRoot` uid/gid 65532 (so the shared `volumeClaimTemplate` PVC is
+  writable across stages — the PipelineRun sets `fsGroup: 65532`), drop ALL
+  caps, `seccompProfile: RuntimeDefault`. Exception: the `assemble` docker-load
+  step runs as uid 0 with a `/var/run/docker.sock` hostPath mount — the only
+  privileged bit in Slice 1, gone at Slice 3.
+- **Single ServiceAccount** `cv-pipeline-sa` for the whole pipeline (split in
+  Slice 1.5), with a namespace-scoped Role.
 - **`docs/frontend-contract.md`** — every assumption the pipeline makes about
   `cv_frontend`'s layout, asserted by the `resolve` Task.
-- **`scripts/`** (in `pipeline-utils`): `resolve-sha.sh`, `assert-release-tree.sh`,
-  `smoke.sh`, `deploy.sh`, `bootstrap.sh`, `lib/log.sh`.
-- **Tests:** bats unit tests for every script (git fixture served by a tiny
-  in-cluster git-http Deployment; one labelled `@network` test for the real
-  pinned SHA). Three negative pipeline tests: bad `APP_SHA`; degenerate release
-  tree; `/healthz` != 200 (+ teardown runs). (The "registry unreachable" test
-  returns at Slice 3.) `scripts/test/e2e.sh` — runs the real pipeline against
-  live OrbStack with a pinned fixture `APP_SHA`, unique per-run namespace,
-  selects resources by PipelineRun UID, captures PipelineRun YAML + Task logs +
-  events before teardown, asserts: PipelineRun success; cloned HEAD ==
-  `APP_SHA`; `crane digest --tarball` matches the Task result; the image is in
-  the OrbStack store; Deployment + running Pod `imageID` match that digest;
-  `kubectl get deploy -o yaml` shows `@sha256`, no tag; cleanup runs after a
-  forced failure.
-- **Rollback** (`docs/runbook.md`): `kubectl rollout undo` / `set image
-  ...@<prev>` (prev from `kubectl rollout history`). The current-digest ConfigMap
-  is the human-readable pointer; the durable audit trail is the signed provenance
-  in zot from Slice 4.
+- **`scripts/`** (cloned from `cv_oci@oci-ref` into the workspace by `resolve`;
+  NOT baked into `pipeline-utils` — a script change is a push, not a rebuild):
+  `resolve-sha.sh`, `assert-frontend-contract.sh`, `assert-release-tree.sh`,
+  `assemble-image.sh`, `smoke.sh`, `deploy.sh`, `lib/log.sh`.
+- **Tests:**
+  - `scripts/test/*.bats` — unit coverage for `resolve-sha`,
+    `assert-frontend-contract`, `assert-release-tree` (a local bare-repo git
+    fixture + one `@network` test for the pinned SHA). Run by the pre-commit hook.
+  - `scripts/test/e2e.sh` — the acceptance test. Runs the real `cv-slice1`
+    Pipeline against the live cluster with the pinned fixture SHA in a unique
+    throwaway namespace (`cv-e2e-<uid>` — Tasks + Pipeline + RBAC + app all live
+    there, deleted wholesale). Captures PipelineRun YAML + all TaskRun logs +
+    events to `scripts/test/_artifacts/` before teardown (`--keep` to retain).
+    Asserts: PipelineRun success; `resolve` app-sha == the fixture; `assemble`
+    tag == `cv:git-<sha>` and digest is `sha256:<64hex>`; the image is in the
+    OrbStack store; the `cv` Deployment uses that tag with `Never`, is `1/1`,
+    and is NOT an `@sha256` ref (OrbStack); the running Pod's imageID matches;
+    the deployed `/healthz` returns 200; `cv-deploy-state` records tag+sha+digest;
+    no smoke resources leaked.
+  - `scripts/test/negative.sh` — proves the pipeline FAILS where it should:
+    (1) a bad `frontend-ref` → `resolve` fails, nothing downstream runs;
+    (2) `cv_frontend@0bbc684` (pre-`/healthz`) → build + assemble succeed,
+    `smoke` fails on `GET /healthz`, `deploy` is skipped, the `finally`
+    smoke-teardown still runs, nothing is deployed, no leak. (The degenerate-
+    release-tree case is asserted at the unit level in `assert-trees.bats` —
+    injecting a broken tree into the real build Task would need a test-only prod
+    code path.) The "registry unreachable" negative returns at Slice 3.
+- **Rollback** (`docs/runbook.md`): `kubectl rollout undo` / `set image` (prev
+  from `kubectl rollout history`). The `cv-deploy-state` ConfigMap is the
+  human-readable pointer; the durable audit trail is the signed provenance in
+  zot from Slice 4.
 
-**Acceptance:** `scripts/test/e2e.sh` passes. `cosign verify` is documented as
-manual this slice (no signature yet — Slice 4).
+**Acceptance (MET):** `scripts/test/e2e.sh` passes (12/12); `scripts/test/negative.sh`
+passes (11/11); `bats scripts/test/` green. First green run: `PipelineRun
+cv-slice1-c87xq`. `cosign verify` is documented as manual this slice (no
+signature yet — Slice 4).
 
 ---
 

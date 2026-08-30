@@ -54,6 +54,29 @@ Verified 2026-08-30 on OrbStack k8s `v1.35.6+orb1` (runtime `docker://29.4.0`):
 Slice 1 therefore uses `crane` → tarball → `docker load` → run by digest. zot and
 a real pull-trust path arrive at Slice 3.
 
+## Slice 1
+
+### `scripts/test/e2e.sh` or `negative.sh` fails
+
+- **Check:** `e2e.sh --keep` leaves the `cv-e2e-<uid>` namespace + the run
+  evidence in `scripts/test/_artifacts/<ns>/` (pipelinerun.yaml, taskruns.yaml,
+  events.txt, pipeline.log, pods.txt, deployed.yaml). Read `pipeline.log` first.
+- **Common causes:** cluster DNS blip in a Task pod (`resolve` retries the
+  clone 3x — if it still fails, `kubectl -n kube-system rollout restart deploy
+  coredns`); the `cv/pipeline-utils:slice1-arm64` image is stale
+  (`bootstrap/build-pipeline-utils.sh` to rebuild + `--check` for the digest);
+  Service-endpoint lag (smoke retries `/healthz` 10x — a persistent failure
+  means the image genuinely doesn't serve).
+- **Cleanup after `--keep`:** `kubectl delete ns cv-e2e-<uid>`;
+  `docker rmi cv:git-<sha>`; `rm -rf scripts/test/_artifacts`.
+
+### A PipelineRun is stuck / a stale `cv` Deployment is running
+
+- **Rollback:** `kubectl -n cv-pipeline rollout undo deploy/cv`, or
+  `kubectl -n cv-pipeline set image deploy/cv app=$(kubectl -n cv-pipeline get
+  cm cv-deploy-state -o jsonpath='{.data.previous}')`. Find the last-good tag in
+  the `cv-deploy-state` ConfigMap or `kubectl rollout history deploy/cv`.
+
 ### `cue vet digests.cue` fails with a constraint error
 
 - **Likely cause:** a digest value is not `sha256:` + 64 hex chars (a tag slipped

@@ -31,7 +31,7 @@ images: {
 	distrolessNode: "sha256:0d757b971ffc552eeb69e4f13b9223b36d79fb28ccb5425f33bf044dd7760b25"
 	// built out-of-cluster by bootstrap/build-pipeline-utils.sh (two-phase, see
 	// docs/bootstrap-toolchain.md). Rebuild + repin when apko.yaml or scripts/ change.
-	pipelineUtils: "sha256:0e4012c8891c7b731dbb1be1f8a92e6269f0a6b08a280712a7f99e3e99c3f8c1"
+	pipelineUtils: "sha256:2868a1ddbd8efe39c1fb58f9b2fb022cc09c0187c11fef2cca0481538a03cc09"
 
 	// docker.io/library/node:24-bookworm-slim — the build Task image. MUST be
 	// debian/glibc + arm64 to match the distroless runtime base: the app's

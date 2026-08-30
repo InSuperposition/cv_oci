@@ -21,8 +21,12 @@ contents:
   packages:
     - wolfi-baselayout
     - ca-certificates-bundle
-    - busybox
-    - coreutils
+    - coreutils        # du, df, cut, head, mktemp, seq, sha256sum, dirname...
+    - grep
+    - sed
+    - gawk
+    - findutils        # find
+    - gnutar           # GNU tar for deterministic image layers (--sort/--mtime)
     - bash
     - git
     - curl

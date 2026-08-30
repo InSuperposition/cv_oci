@@ -80,7 +80,18 @@ fi
 
 url="http://${NAME}.${NS}.svc.cluster.local/healthz"
 log_kv step=smoke action=probe url="$url"
-code="$(curl -s -o /dev/null -m "$CURL_MAX" -w '%{http_code}' "$url" || echo 000)"
-[ "$code" = "200" ] || die "smoke: GET /healthz -> $code (want 200)"
+code=000
+for attempt in $(seq 1 10); do
+	code="$(curl -s -o /dev/null -m "$CURL_MAX" -w '%{http_code}' "$url" 2>/dev/null || true)"
+	[ "$code" = "200" ] && break
+	log_kv step=smoke probe_attempt="$attempt" code="${code:-000}"
+	sleep 3
+done
+if [ "$code" != "200" ]; then
+	kubectl -n "$NS" get endpoints "$NAME" -o wide >&2 || true
+	kubectl -n "$NS" get pods -l "app=$NAME" -o wide >&2 || true
+	kubectl -n "$NS" logs "deploy/$NAME" --tail=30 >&2 || true
+	die "smoke: GET /healthz -> ${code:-000} (want 200)"
+fi
 
 log_kv step=smoke result=ok image="$IMAGE" healthz=200

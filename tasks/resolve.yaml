@@ -34,7 +34,12 @@ spec:
         #!/usr/bin/env bash
         set -euo pipefail
         rm -rf cvoci
-        git clone --quiet "$(params.oci-repo)" cvoci
+        for attempt in 1 2 3; do
+          git clone --quiet "$(params.oci-repo)" cvoci && break
+          echo "clone attempt $attempt failed, retrying..." >&2
+          rm -rf cvoci; sleep 3
+        done
+        [ -d cvoci/.git ] || { echo "could not clone $(params.oci-repo)" >&2; exit 1; }
         git -C cvoci checkout --quiet "$(params.oci-ref)"
         echo "cvoci at $(git -C cvoci rev-parse HEAD)"
     - name: resolve-and-fetch

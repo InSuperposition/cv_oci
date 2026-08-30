@@ -18,7 +18,8 @@ spec:
       workingDir: $(workspaces.shared.path)/src
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000            # node:slim 'node' user
+        runAsUser: 65532          # same uid as every other Task -> shared PVC writable
+        runAsGroup: 65532
         allowPrivilegeEscalation: false
         capabilities: { drop: ["ALL"] }
         seccompProfile: { type: RuntimeDefault }
@@ -38,7 +39,7 @@ spec:
       workingDir: $(workspaces.shared.path)
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
+        runAsUser: 65532
         allowPrivilegeEscalation: false
         capabilities: { drop: ["ALL"] }
         seccompProfile: { type: RuntimeDefault }

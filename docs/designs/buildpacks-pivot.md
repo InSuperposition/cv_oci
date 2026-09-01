@@ -53,6 +53,11 @@ chain*, not about hand-rolling OCI plumbing.
 - **Local dev:** OrbStack Kubernetes on Apple Silicon, `v1.35.6+orb1`,
   cri-dockerd, **arm64 only, single node**. Tekton Pipelines v1.15.1 installed.
 - **Native arch only, no QEMU** (standing rule, kept).
+- **Builder = `heroku/builder:24`** (probed 2026-09-01). Every
+  `paketobuildpacks/builder-*` on Docker Hub is amd64-only; Heroku's is genuinely
+  multi-arch. Below, "Paketo" as a noun still names the *concept* the deferred
+  `cv_packs` suite mirrors; the running cv_oci builder is Heroku's. Node support
+  is the monolithic `heroku/nodejs` buildpack (detect + install + launch in one).
 - **Reuse the existing stack.** zot as the registry. cosign, Tekton Chains, Flux,
   Timoni stay in the curriculum. No new controllers (no kpack).
 - **`cv_frontend` has no `npm run build`.** `package.json` scripts: `dev`, `hmr`,
@@ -167,7 +172,7 @@ error (9), gate-zero fixture (2), Commit 1 split (5), demoting
 
 ### Approach A: Stock Paketo builder + incremental slices (chosen)
 
-Gate zero builds `cv_frontend@SHA` with a stock Paketo arm64 builder. Commit 1
+Gate zero builds `cv_frontend@SHA` with heroku/builder:24 (arm64). Commit 1
 (a/b) is the reference lane + old-pipeline demolition. Then the supply-chain
 slices layer on, each its own bisect-safe commit, pipeline green throughout.
 Effort M, risk Low.
@@ -206,17 +211,27 @@ Approach A. Gate zero (cv_frontend@SHA) → Commit 1a (CNB pipeline alongside ol
     same or a targeted exception).
   - `create` hardcodes `runAsUser: 1000` — the Paketo builder's `CNB_USER_ID` is
     1000, so this matches. Record it.
-- **Reference builder: a Paketo arm64 multi-arch builder with Node.js**
-  (`paketobuildpacks/builder-noble` or the UBI 9/10 multi-arch builder — both
-  ship arm64 + Node.js as of 2026). Pin by digest in `digests.cue`. Native arm64
-  build on OrbStack, no QEMU.
+- **Reference builder: `heroku/builder:24`.** Probed 2026-09-01: every
+  `paketobuildpacks/builder-*` image on Docker Hub is **amd64-only**
+  (`builder-jammy-*`, `builder-ubi8-base`); `builder-noble-*` / `builder-ubi9-*`
+  do not exist. The office-hours claim that Paketo ships arm64 builders did not
+  survive a live check. `heroku/builder:24` is genuinely multi-arch — arm64
+  child `sha256:e74d36e0e70f9b588f62483bef73a51809c1f51f04103dbb323293261bfc43aa`,
+  lifecycle 0.21.18 (platform API 0.7–0.15, task default 0.9), run image
+  `heroku/heroku:24` (arm64 present). Its Node support is the **monolithic**
+  `heroku/nodejs` buildpack (not decomposed into `node-engine`/`npm-install`/
+  `npm-start` the way Paketo is). For cv_oci that is fine — it needs a working
+  CNB build, and `heroku/nodejs` does detect + install + launch. The monolith
+  only matters for `cv_packs` (which can no longer mirror a Paketo decomposition
+  the reference lane does not have — noted in the TODO). Pin the arm64 child
+  digest in `digests.cue`. Native arm64 build on OrbStack, no QEMU.
 - **Node version pin:** set `BP_NODE_VERSION` (or rely on a tightened
   `cv_frontend` `engines.node: ~24.3`) so the runtime is Node 24.x.
 - **No build cache** in Commit 1 (`SKIP_RESTORE=true`).
 
 ### Gate zero (Commit 0, throwaway TaskRun — not committed to `cv_oci` `main`)
 
-Run the vendored `buildpacks` 0.6 task with a stock Paketo arm64 builder against
+Run the vendored `buildpacks` 0.6 task with heroku/builder:24 (arm64) against
 `cv_frontend` at the pinned fixture SHA, on the arm64 node. **Assert:**
 `creator` exits 0; the SBOM is emitted; `optionalDependencies` (esbuild, oxc,
 lightningcss arm64 binaries) are present in the launch layer; a Pod from the
@@ -272,9 +287,11 @@ Delete `tasks/assemble.yaml`, `tasks/build.yaml`, `tasks/resolve.yaml` (folded),
 
 ## Open Questions
 
-1. **Gate zero outcome** — does the stock Paketo arm64 builder build
-   `cv_frontend@SHA` on the arm64 OrbStack node and produce a running image?
-   Resolved by Commit 0. FAIL → Approach C.
+1. **Gate zero outcome** — RESOLVED 2026-09-01, PASS (`docs/gate-zero.md`,
+   commit `a7897c1`). `heroku/builder:24` (arm64) builds `cv_frontend@cb333ee`
+   end to end via the vendored `buildpacks` 0.6 task; the image serves `/healthz`
+   and `/` with 200s; the `optionalDependencies` arm64 binaries survive the
+   launch prune. **Approach A confirmed.**
 2. **Node version control** — `BP_NODE_VERSION` env var vs tightening
    `cv_frontend`'s `engines.node`. Decide with the `cv_frontend` prep commit.
 3. **`prepare` root step vs PSA** — does the pipeline namespace need `privileged`
@@ -290,7 +307,7 @@ Delete `tasks/assemble.yaml`, `tasks/build.yaml`, `tasks/resolve.yaml` (folded),
   (`github.com/InSuperposition/cv_packs`, empty repo created 2026-09-01; local
   scaffold at `../packs/`). Its own bisect-safe history, own design doc. Builds
   `cv_frontend` (and other fixtures) with hand-authored buildpacks, diffs against
-  the stock Paketo lane. **Never pinned into cv_oci's `BUILDER_IMAGE`.** Start it
+  the stock heroku/builder:24 lane. **Never pinned into cv_oci's `BUILDER_IMAGE`.** Start it
   when the cv_oci curriculum is further along and you want the buildpack-authoring
   lesson. If it happens: `cv_packs/buildpacks/<id>/` where directory name ==
   buildpack id (`cv/node-engine`, `cv/npm-install`, `cv/npm-build`,
@@ -312,7 +329,7 @@ Paketo arm64 builder builds `cv_frontend@SHA`, the image runs under the target
 security context, `/healthz` + `/` return 200, `optionalDependencies` arm64
 binaries are in the launch layer.
 
-**Commit 1a:** `cv_frontend` deploys from a stock-Paketo CNB image pulled from
+**Commit 1a:** `cv_frontend` deploys from a heroku/builder:24 CNB image pulled from
 zot by `@sha256`; `e2e-cnb.sh` green; the old pipeline still green; old design
 docs demoted; bisect-safe.
 

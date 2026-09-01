@@ -10,10 +10,12 @@ Status: ACTIVE — plan of record for cv_oci. Approved 2026-09-01; revised by
 day. Implementation in progress.
 Mode: Builder
 Supersedes: `docs/designs/pipeline-restructure.md`,
-`docs/designs/pipeline-gitops-replan.md` (both now carry SUPERSEDED headers), and
-the /office-hours draft `tensor-main-design-20260829-155358.md`. Still-valid
-content from the first two is mapped in "Relationship to the old slice plan"
-below and will be merged into one SSOT after Commit 1b.
+`docs/designs/pipeline-gitops-replan.md`, and the /office-hours draft
+`tensor-main-design-20260829-155358.md`. **SSOT merge done 2026-09-01** — every
+still-valid piece of the first two now lives in "The supply-chain slices" +
+"Reference" below; delete both files when this merge lands.
+Revision: 2026-09-01 (Slices 1.5 + 2 landed; Slices 3–7 re-spec'd for CNB;
+multi-arch dropped; runtime-image + SBOM posture decided).
 
 ## Problem Statement
 
@@ -268,22 +270,515 @@ Delete `tasks/assemble.yaml`, `tasks/build.yaml`, `tasks/resolve.yaml` (folded),
 `pipelineUtils` entries. Delete the old `e2e.sh` / `negative.sh`; rename the
 `-cnb` variants into place. `validate.sh` now covers one pipeline.
 
-### Relationship to the old slice plan
+### Relationship to the old slice plan (SSOT merge, 2026-09-01)
 
-| Old slice | Still valid? | Where it goes |
+This section and the two that follow it ("The supply-chain slices", "Reference")
+absorb everything still valid from `pipeline-restructure.md` (Slices 2–7, the
+`plan/` reference material) and `pipeline-gitops-replan.md` (Parts 2–3, the
+confirmed decisions, the probe list). **Both docs are now fully superseded —
+delete them when this merge lands.**
+
+| Old slice | Status | Where it is now |
 |---|---|---|
-| Slice 0 (config + validation tooling) | yes | `digests.cue` + `validate.sh` kept; `gen-digests.sh` reviewed in 1b |
-| Slice 1 (tracer bullet) | replaced | gate zero + Commit 1a/1b (CNB reference lane) |
-| Slice 1.5 zot seed (replan, two-address) | yes | prerequisite for Commit 1a (needs a registry) |
-| Slice 1.5 (per-stage SAs) | yes | a later commit, unchanged intent — now also splits the `dockerconfig`/`prepare-root` grants |
-| Slice 2 (determinism) | **done (test + fix)** | `scripts/test/repro.sh` builds `cv_frontend@SHA` twice, asserts equal app-layer + SBOM-layer content hash (lifecycle's own `io.buildpacks.lifecycle.metadata` diffIDs) + equal outer digest (bonus). Root cause was `.git/` bleed-through, fixed in `fetch`. Repro CronJob deferred to TODOS.md (no persistent cluster yet — same gate as portability kind-CI). |
-| Slice 3 (CVE gate + SBOM) | yes | CNB emits the SBOM (Syft/SPDX via Paketo); add the Trivy CVE gate; drop the old "Trivy authors, zot stores" split note (CNB authors now) |
-| Slice 4 (Chains: build run + verify+deploy run) | **mechanism changed** | Chains observes `APP_IMAGE_URL`/`APP_IMAGE_DIGEST`. The full provenance chain needs the task to emit builder/buildpack/run-image digests as typed results — task-authoring work (Decision 8). Then the two-run split is unchanged. |
-| Slice 5 (amd64 + multi-arch index) | yes | still gated on an amd64 node; Tekton Matrix over `arch`, one Paketo builder per arch |
-| Slice 6 (promotion + zot authz) | yes | `crane cp` the verified digest, unchanged |
-| Slice 7 (Timoni + Flux GitOps) | yes | unchanged |
-| OpenBao slice | yes | unchanged |
-| `plan/` reference (rules, glossary, test layers) | yes | migrate into a merged SSOT after Commit 1b |
+| Slice 0 (config + validation tooling) | kept | `digests.cue` + `validate.sh` + `gen-digests.sh` + `.githooks/pre-commit` |
+| Slice 1 (tracer bullet) | replaced | gate zero (`a7897c1`) + Commit 1a (`f77c9db`) + Commit 1b (`b335cf2`) |
+| Slice 1.5 zot seed | done | `manifests/zot/`, `bootstrap.sh` phase 4. One address (OrbStack service DNS), not the replan's two-address hostPort design — hostPort is dead on OrbStack (`docs/runbook.md`). |
+| Slice 1.5 per-stage SAs | done (`d956572`) | `cv-build-sa` / `cv-smoke-sa` / `cv-deploy-sa`, wired via `taskRunSpecs`. No `dockerconfig` grant — zot is unauth until Slice 5. |
+| Slice 2 (determinism) | done (`30cd4c7`) | `scripts/test/repro.sh`. Root cause was `.git/` bleed-through in `fetch`, not the lifecycle. Byte-for-byte reproducible. Repro CronJob → TODOS.md. |
+| Slice 1.7 (PodSecurity) | **new, scoped below** | Open Question 3 — run `fetch` + `build` as uid 1000 + `fsGroup`, delete `prepare`'s root chown, go `restricted`. Small. |
+| Slice 3 (CVE gate + SBOM) | **re-spec'd below** | Trivy only — the reproducible CVE verdict (pinned DB) + an SBOM-presence test. No `syft`/`oras`; referrers move to Slice 4. zot NetworkPolicy **dropped** (non-goal). |
+| Slice 4 (Chains) | **re-spec'd below** | Sign + provenance + referrers. **No verify run / EventListener — CM-1-A superseded.** New: reproducible (content-addressable) provenance; `build` emits builder/run/buildpack digests (Decision 8); git-resolve the pipeline from GitHub (NOT gated by P4). Probes P8/P9/P10. |
+| Slice 5 (amd64 + multi-arch index) | **dropped** | Non-goal (Q2). Single platform digest is the release identity. Reference → non-goals. |
+| Slice 6 (promotion + zot authz) | **folded into Slice 5 (GitOps)** | Promotion is a git commit of a digest line in `cv_gitops` — no script, no authz. htpasswd + `dockerconfig` wiring land with the Flux pull credential. |
+| Slice 7 (Timoni + Flux GitOps) | **re-spec'd, renumbered Slice 5** | App deploy only, **no Timoni** (~40-line manifest). New repo `cv_gitops`; `deploy`'s tail `git push`es the digest; Flux `GitRepository` + `spec.verify`. Deterministic manifest generation. Probe P5. |
+| Slice 6 (reconstruction) — **new** | **scoped below** | The capstone: `reconstruct.sh <SHA>` rebuilds image + SBOM + verdict + provenance + manifest and asserts every digest matches deployed state. Replaces the superseded verify-run's "materials assertion". |
+| OpenBao slice | **not a planned slice** | Trust-root cutover breaks bisect-green (finding H). Noted as its own arc, gated on P6. |
+| `plan/` reference (rules, glossary, test layers) | **merged below** | "Reference" section, CNB-updated. Crane/apko-era layers + the NetworkPolicy + the multi-run verify design dropped. |
+
+### The supply-chain slices (CNB-era spec)
+
+Numbering after the merge: Slices 1.5 (SAs) and 2 (determinism) have landed.
+What follows is **1.7 → 3 → 4 → 5 → 6**. Each lands as its own green,
+bisect-safe commit against the one Pipeline `cv-build`
+(`fetch → build → scan → smoke → deploy` after Slice 3, `finally` teardown).
+OpenBao is noted at the end but is not a planned slice.
+
+**The spine: verification by reconstruction, not trust** (eng review, this
+session — three steers: separation of concerns → negative space → determinism +
+innovation).
+
+Slice 2 proved the *build* is byte-for-byte reproducible. Slices 3–6 extend that
+property to every artifact in the chain: image, SBOM, CVE verdict, provenance,
+deployed manifest are each a **deterministic function of `cv_frontend@SHA` + the
+pinned toolchain** (`digests.cue`). Signatures are the fast path; **reconstruction
+is ground truth** — a verifier with the source SHA and `digests.cue` rebuilds the
+whole chain and checks every digest, needing zero trust in whoever ran the
+pipeline. This combines legacy reproducible-build practice (Nix / Debian /
+`SOURCE_DATE_EPOCH` / content-addressed storage) with modern supply-chain tooling
+(SLSA, sigstore, the CNB lifecycle, GitOps).
+
+Consequences for the slice specs:
+
+- **CM-1-A is SUPERSEDED.** No separate verify+deploy PipelineRun, no
+  EventListener, no cloudevents wiring. The separate verify run existed to
+  "verify a signature you didn't produce" — on this cluster the pipeline *is* the
+  deployer, so that machinery is negative space. Verification happens at exactly
+  one boundary (Flux `spec.verify`, Slice 5) plus a reconstruction check
+  (Slice 6). The prior "Flux `spec.verify` is insufficient" argument (replan
+  findings 21–23) is answered: `spec.verify` checks the signature; the
+  reconstruction check covers what it can't (materials / provenance match).
+- **CM-2-A stands** — Slice 4 signs with a cosign key in a K8s Secret; OpenBao is
+  a separate arc, **not a planned slice** (finding H: the trust-root cutover
+  breaks bisect-green; note it, don't schedule it).
+- **SBOM (Q3 + eng review)** — the CNB lifecycle authors the SBOM (CycloneDX +
+  SPDX embedded layer, confirmed in the repro probe; ships with every pull).
+  Slice 3 adds Trivy only (CVE gate + SBOM-presence test); the OCI-referrer
+  attach lands in Slice 4 with the signature.
+- **Multi-arch (Q2)** — dropped. Single platform digest is the release identity.
+  Non-goal (Reference).
+- **zot NetworkPolicy (eng review)** — dropped. Single-node solo cluster, no
+  hostile tenant; every candidate policy risks breaking kubelet pulls / test
+  namespaces / Flux. Non-goal (Reference); `debt.md` row → resolved-as-wontfix,
+  trigger "any second node / multi-tenant".
+- **Timoni for the app deploy (eng review)** — dropped. `timoni build` to render
+  one Deployment + one Service + one digest is machinery for many-service /
+  many-environment; the manifest is ~40 lines with the digest substituted. Timoni
+  stays only in the pipeline-infra TODO (20+ Tekton resources, where CUE modules
+  earn their weight).
+- **Runtime image (Q1)** — `heroku/heroku:24` (full Ubuntu 24.04) stays. A
+  probe of `heroku/builder:24` + `-run-image=paketobuildpacks/run-noble-tiny`
+  failed at export (`MANIFEST_INVALID`, tiny image missing
+  `io.buildpacks.base.distro.*` labels). Rules rewritten (Reference → rule 9);
+  `debt.md` carries it; the Slice 3 CVE gate scans the run image.
+
+#### Slice 1.7 — pipeline-namespace PodSecurity (Open Question 3)
+
+Small; closes a standing question, unblocks nothing downstream.
+
+- The only uid-0 actor is the `build` task's `prepare` step (`chown -R` on
+  `/layers`, `/tekton/home`, the workspace). The zot seed is already
+  `restricted`-compatible (`runAsNonRoot: true`, `runAsUser: 65532`).
+- **Approach: probe whether `prepare`'s chown is redundant, then delete it.**
+  `fsGroup: 1000` is already set on the PipelineRun podTemplate → the PVC +
+  emptyDirs (`/layers`, `/platform`) are group-owned 1000 and group-writable.
+  **But** (eng-review finding): `fetch` runs `alpine/git` as uid 0, so the
+  checked-out tree lands root-owned; `fsGroup` sets the group on *new* files, it
+  does not chown existing ones. So the probe must run against a **realistic**
+  tree (root-owned from `fetch`), not a clean slate, and it must check the
+  `creator` step can both **read and (if needed) delete** the source
+  (`fetch` already does `rm -rf .git` — but as `fetch`, not `create`).
+- **The clean fix, most likely:** run `fetch` **and** `build` pods as
+  `runAsUser: 1000` + `fsGroup: 1000`. Every file is 1000-owned from creation;
+  `prepare`'s chown becomes dead code; delete it; `cv-pipeline` goes
+  `enforce=restricted`.
+- Fallback: `enforce=baseline` + a documented `prepare` exception, `restricted`
+  tracked in `debt.md`.
+- **Acceptance:** `cv-pipeline` enforces `restricted` (or `baseline` on the
+  fallback); `e2e.sh` + `negative.sh` + `repro.sh` stay green; no SA can schedule
+  a privileged pod (`kubectl auth can-i`).
+
+#### Slice 3 — reproducible CVE verdict + SBOM-presence test
+
+One new tool: **`trivy`** (one image, pinned in `digests.cue`, one row in
+`docs/bootstrap-toolchain.md`).
+
+**CVE gate.** A `scan` step between `build` and `smoke` — `smoke`/`deploy` only
+run if it passes.
+
+- `trivy image` the built digest (plain-HTTP zot — `TRIVY_INSECURE=true`).
+  Trivy **consumes**, never authors.
+- Policy = "fixable CRITICAL as of now": fail on a currently-fixable CRITICAL, no
+  baseline ledger.
+- **Also scans the run image** (`heroku/heroku:24`, Q1).
+- **Reproducible verdict (the determinism angle).** The vuln-DB is an OCI
+  artifact (`ghcr.io/aquasecurity/trivy-db`). Pin it by digest in `digests.cue`;
+  Trivy runs `--skip-db-update` against a snapshot baked into the scanner image
+  or cached on the workspace. Record `(image digest, DB digest) → verdict` — as a
+  file in the run, and (Slice 4) as a referrer. "As of DB snapshot X, zero
+  fixable CRITICALs" becomes a claim anyone can re-run to the exact same answer.
+  The DB pin is per-run provenance, orthogonal to Slice 2 build determinism.
+
+**SBOM-presence test.** No new tooling — `crane` (host tool) reads
+`io.buildpacks.lifecycle.metadata.sbom.sha`, pulls that layer, asserts it parses
+as valid CycloneDX + SPDX and names the production npm deps + the Node runtime.
+Document the extraction path in `docs/runbook.md`.
+
+**Acceptance:** a new `negative.sh` case (known-fixable-CVE fixture fails readably;
+clean image passes); an `e2e.sh` assertion that the SBOM layer is present +
+well-formed + the CVE-verdict record is written; `validate.sh` green; bisect-safe.
+
+#### Slice 4 — Chains: sign + reproducible provenance + referrers
+
+No verify task, no verify run, no EventListener (CM-1-A superseded). Chains signs
+asynchronously after the PipelineRun completes; `deploy` keeps doing
+`kubectl apply` in this slice, unchanged.
+
+**Provenance authoring (Decision 8 — real task work).** The `build` task emits, as
+typed results, the whole input closure so the SLSA predicate names it:
+
+- `BUILDER_IMAGE_DIGEST`, `RUN_IMAGE_DIGEST` — from `/layers/report.toml` + the
+  pinned builder param. **Fix first (eng-review finding E):**
+  `tasks/buildpacks.yaml:198` does `grep "digest" report.toml | cut -d'"' -f2` —
+  `report.toml` can carry multiple `digest` keys (`[image]`, `[run-image]`); the
+  `grep` takes the first, and a lifecycle schema change would silently yield the
+  wrong digest with every downstream check still passing. Parse the specific TOML
+  key, not the first `digest` line.
+- `BUILDPACKS` — id\@version list from `io.buildpacks.build.metadata`.
+- `APP_SOURCE_DIGEST` — `cv_frontend@<full-sha>` (known in `fetch`).
+- `*_ARTIFACT_INPUTS` type hints so Chains records them as materials.
+- **Chains result-name check (eng-review finding):** Chains matches the
+  `*_IMAGE_URL` / `*_IMAGE_DIGEST` suffix on **task** results (the `buildpacks`
+  task's `APP_IMAGE_DIGEST` matches). The **pipeline** re-surfaces them kebab
+  (`app-image-digest`). Confirm PipelineRun-level matching or keep the underscore
+  convention on the pipeline results.
+
+**Git-resolve the Pipeline** so `status.provenance.refSource` names it — the
+Tekton **git** resolver (already enabled, `bootstrap.sh` phase 2), pulling
+`pipeline.yaml` from **GitHub**. Needs only the repo pushed to a reachable remote
+— **not gated on P4** (P4 is the separate *bundles* resolver, a later nicety).
+
+**Reproducible provenance (the determinism + innovation angle).** Two
+byte-identical builds of one SHA (proven in Slice 2) do NOT produce identical
+provenance by default — the predicate embeds build start/end time and the run
+UID. **Normalize those fields** (or configure Chains to omit them) so the
+predicate itself is content-addressable. `repro.sh` extends: build twice, assert
+identical provenance digest. **Probe first** — Chains may not expose enough
+control over the predicate; fall back to "provenance records the inputs but is
+not itself content-addressed" and note the gap.
+
+**Build run.** Install Chains observe-only first (pipeline stays green). Config:
+`artifacts.pipelinerun.format=slsa/v2alpha4`, `storage=oci`, cosign key in the
+`signing-secrets` Secret (`tekton-chains` ns), no Rekor.
+**Probe (eng-review finding D):** cosign no-Rekor verify against a Chains
+`sigstore-bundle` is version-sensitive (RFC3161 timestamp flags, predicate-type
+URI). Confirm the exact `cosign verify` / `verify-attestation` invocation before
+relying on it.
+**Probe (eng-review finding B):** Chains `storage: oci` uses the tag scheme
+(`sha256-<digest>.sig` / `.att`) by default, **not** the OCI 1.1 referrers API.
+`oras discover` finds nothing unless Chains is configured for referrers. Pick one
+and make the SBOM/verdict referrers match.
+
+**Referrers.** With the key present, attach as referrers to the app digest:
+the SLSA provenance (Chains), the CycloneDX SBOM, the CVE-verdict record.
+
+**Acceptance:** `cosign verify` + `cosign verify-attestation` pass; a tampered
+image fails; `repro.sh` asserts identical provenance digest (or the fallback gap
+is documented); referrers are discoverable by the chosen scheme; bisect-safe.
+
+#### Slice 5 — reproducible deployed state (GitOps via a new `cv_gitops` repo)
+
+Absorbs the old standalone promotion slice. **No Timoni.** Promotion is negative
+space — a git commit of a digest line, never a rebuild, never a script.
+
+**New repo: `github.com/InSuperposition/cv_gitops`** — the delivery half to
+cv_oci's integration half. Its own bisect-safe history + design doc (like
+`cv_packs`). Separate from cv_oci (not a subdir) so a future push-trigger on
+cv_oci can't self-fire on deploy commits, and the push credential never touches
+source. Acyclic dataflow:
+
+```
+cv_frontend push → cv_oci pipeline → build → scan → sign (Chains, async)
+                                       │
+                                       └─ deploy: git push digest → cv_gitops → Flux → cluster
+```
+
+**Contents of `cv_gitops`:** a Flux `Kustomization` + a plain `cv` manifest
+(Deployment + Service) with the image digest as the only per-release variable.
+The manifest is **generated deterministically** from `(app digest, a pinned
+template in cv_oci)` — a test asserts regeneration is byte-identical. `cv_gitops`
+HEAD content is therefore a pure function of the verified build.
+
+**Promotion.** `cv_gitops` `main` = every verified build ships (continuous
+deployment; "promote by reference, never rebuild" is demonstrated by the absence
+of any rebuild path). If a human gate is ever wanted: a `release` branch Flux
+watches, and promotion is `git cherry-pick`.
+
+**zot auth.** htpasswd — anonymous pull denied, one CI credential wired through
+the `build` task's `dockerconfig` workspace + a Flux `imagePullSecret`. Still
+plain-HTTP on the solo cluster; htpasswd-over-HTTP puts Basic-auth creds on the
+wire in the clear — TLS mandatory at any non-loopback hop (`debt.md`).
+
+**Flux.** A `GitRepository` watches `cv_gitops`; a `Kustomization` applies the
+`cv` manifest; the image is pulled from zot by digest;
+`GitRepository.spec.verify` (cosign) gates the reconcile. **Probe P5:** exact
+scope of `spec.verify` on a git source (the commit only? the referenced image?
+attestations? bounded retry?).
+
+**`deploy` leaves `kubectl apply` behind** — its tail becomes `git push` to
+`cv_gitops` via a narrow deploy key. Flux owns the workload.
+
+**Commit signing (eng-review finding L):** don't sign the `cv_gitops` commits —
+the trust anchor is the cosign-signed *image digest* the manifest references, not
+the commit. Avoids another in-cluster signing key with no KMS story.
+
+**Environment note (eng-review finding N):** the "manual `kubectl edit` is
+reverted by Flux" acceptance test needs a cluster that stays up. OrbStack is torn
+down between sessions (same gap as the repro CronJob) — this test runs when a
+persistent cluster exists, or on a `kind` cluster held up for the test.
+
+**Acceptance:** the deploy `git push` lands in `cv_gitops`; regenerating the
+manifest is byte-identical; Flux reconciles `cv` to the pushed digest; `cosign
+verify` gates the reconcile; a tampered `cv_gitops` commit fails; anonymous zot
+pull denied.
+
+#### Slice 6 — zero-trust reconstruction (the capstone)
+
+The payoff of the spine. A check that, given **only** `cv_frontend@SHA` and
+`digests.cue`:
+
+- rebuilds the image (Slice 2 → identical app-layer + outer digest),
+- rebuilds / re-reads the SBOM (identical `sbom.sha`),
+- re-runs the CVE scan at the pinned DB digest (identical verdict),
+- rebuilds the provenance (identical predicate digest, if Slice 4's normalization
+  held),
+- regenerates the `cv_gitops` manifest (identical bytes),
+- asserts every digest matches what is currently deployed.
+
+A verifier runs this with zero trust in the pipeline operator — signatures become
+a fast path, not the root of trust. Runs as a CronJob on a persistent cluster, or
+on demand / in `kind` CI. This **replaces** the murky "materials assertion" from
+the superseded verify-run design with something concrete and testable.
+
+**Acceptance:** `reconstruct.sh <SHA>` exits 0 when every artifact digest matches
+the deployed state; a deliberately-tampered deployed digest makes it exit non-zero
+with the specific mismatch named.
+
+#### OpenBao — noted, not a planned slice
+
+The natural next lesson (persistent OpenBao, transit signing, `hashivault://`
+KMS URI for Chains) is its own arc. Deliberately not scheduled here: migrating
+the cosign key from a K8s Secret to transit changes the trust root, so
+`cosign verify` on every pre-migration release fails afterward — a `git bisect`
+across that commit cannot stay green without a re-sign / trust-transition story
+(eng-review finding H). Do it as a standalone project with that story worked out,
+gated on **probe P6** (Chains + sigstore `hashivault://` against OpenBao).
+
+#### Probes still open (run before the slice each gates)
+
+| Probe | Question | Gates |
+|---|---|---|
+| **P4** | Can the Tekton **bundles** resolver pull task/pipeline bundles from plain-HTTP zot? (The **git** resolver is separate, already enabled, pulls from GitHub — NOT gated by P4.) | a later optional "tasks as OCI bundles" nicety — nothing in Slices 3–6 depends on it |
+| **P5** | Flux `GitRepository.spec.verify` exact scope on a git source — the commit only, or the referenced image? attestations? bounded retry/failure? | Slice 5 |
+| **P8** | Chains predicate control — can the `slsa/v2alpha4` predicate's build start/end time + run UID be normalized or omitted, so two builds of one SHA produce an identical provenance digest? | Slice 4 reproducible provenance (fall back to "records inputs, not content-addressed") |
+| **P9** | Chains `storage: oci` — tag scheme (`sha256-<digest>.sig`/`.att`) or the OCI 1.1 referrers API? Which does `oras discover` / `cosign download` see? | Slice 4 referrer layout (SBOM + CVE-verdict must match) |
+| **P10** | The exact `cosign verify` / `verify-attestation` invocation for a Chains `sigstore-bundle` with **no Rekor** — timestamp flags, predicate-type URI. | Slice 4 verify + Slice 5 Flux `spec.verify` |
+| **P6** | Tekton Chains + sigstore `hashivault://` against OpenBao — works? K8s auth or static token? | the OpenBao arc (not a planned slice) |
+| **P7** | Flagger meshless (`provider: kubernetes`) — any metric signal without a mesh? does `cv_frontend` need `/metrics`? | a possible progressive-delivery slice, not yet planned |
+
+P1/P2/P3 (regctl assembly, `docker load`, zot two-address) are **dead** — the
+crane/apko assembly path they gated no longer exists, and the zot address
+question was settled by the OrbStack service-DNS finding.
+
+---
+
+## Reference (merged from `pipeline-restructure.md` `plan/`, CNB-updated)
+
+### Architecture invariants
+
+1. One `cv_frontend` commit SHA is built per run. **arm64 only** — multi-arch is
+   a non-goal for cv_oci (Q2, 2026-09-01).
+2. The release identity is the **single platform image digest** (the retired
+   "multi-arch index digest" invariant goes with multi-arch).
+3. Promotion moves references; it never rebuilds.
+4. Builder, run image, and every step image are pinned by digest in
+   `digests.cue`; a bump is a reviewed commit.
+5. Security metadata (signature, provenance, SBOM referrer) is attached to the
+   app digest as OCI referrers, not scattered. (The SBOM also ships inside the
+   image as a lifecycle-authored layer — the referrer is the queryable copy,
+   attached at Slice 4.)
+6. Every pipeline stage runs as its own least-privilege ServiceAccount
+   (`cv-build-sa` / `cv-smoke-sa` / `cv-deploy-sa`). Done: `d956572`.
+7. **Every artifact in the chain is a deterministic function of `cv_frontend@SHA`
+   + `digests.cue`** — image (Slice 2), SBOM, CVE verdict at a pinned DB (Slice
+   3), provenance (Slice 4, probe P8), deployed manifest (Slice 5). Verifiable by
+   reconstruction (Slice 6), not only by signature. Fail loudly on any drift.
+8. The pipeline is portable to any conformant **arm64** Kubernetes;
+   registry-trust bootstrap is the one documented per-platform node exception
+   (`docs/runbook.md`). It is not portable to an amd64-only cluster — see the
+   non-goals.
+
+### Non-goals (deliberate absences, with upgrade triggers)
+
+| Not doing | Why | Revisit when |
+|---|---|---|
+| Multi-arch / amd64 / OCI image index | No amd64 node available; single-node arm64 OrbStack. Release identity is the single platform digest. | a real deploy target or `cv_packs` needs amd64 — new design, not a resumed slice |
+| zot NetworkPolicy | Single-node solo cluster, no hostile tenant; every candidate policy risks breaking kubelet pulls / test namespaces / Flux. | any second node, or any multi-tenant scenario |
+| Distroless / minimal run image | Adopting a stock builder means adopting its run image; `heroku` has no distroless variant and a `run-noble-tiny` override failed at export (Q1). | a compatible distroless multi-arch run image exists, or a second node raises the stakes |
+| Standalone promotion slice | Folded into Slice 5 (GitOps). Promotion is a git commit of a digest line in `cv_gitops` — no script, no pipeline, no candidate/release authz. `main` ships every verified build; a `release` branch + `git cherry-pick` if a gate is ever wanted. | never (this is the shape) |
+| Separate verify+deploy PipelineRun (CM-1-A) | Superseded. It solved "verify a signature you didn't produce"; on a single-actor cluster that is negative space. Verification = Flux `spec.verify` (one boundary) + the Slice 6 reconstruction check. | a real external consumer of the signed artifact appears |
+| Timoni for the app deploy | ~40-line manifest, one service; `timoni build` is for many-service / many-env. | stays in the pipeline-infra TODO (20+ Tekton resources) |
+| OpenBao / KMS signing | Trust-root cutover breaks bisect-green (finding H); its own arc with a re-sign story. | you want the KMS lesson — as a standalone project, gated on P6 |
+
+### Component boundaries (CNB)
+
+- **Git** owns source identity, the pinned digest set (`digests.cue`), Tekton
+  definitions, security-policy config. Not generated SBOMs or OCI artifacts.
+- **Tekton** owns orchestration only.
+- **The CNB lifecycle** (`/cnb/lifecycle/creator`, vendored `buildpacks` 0.6
+  task) owns *all* image production: detect, build, export, SBOM authoring,
+  reproducible layering. This is the component that replaced ~1530 lines of
+  `crane` + `apko` + bash. cv_oci configures it; it does not re-author it.
+- **Workspace** (per-run PVC) is the ephemeral source + `/layers` bus. `fetch`
+  writes source; `build` owns `/layers`; nothing downstream writes source.
+- **zot** is the canonical OCI registry: app image, signatures, provenance, SBOM
+  referrers, tag aliases. Storage only.
+- **Trivy** is the CVE evaluator — consumes the SBOM / image, applies the
+  fixable-CRITICAL policy. Does **not** author the SBOM.
+- **Tekton Chains** owns automated trust evidence: signing, PipelineRun SLSA
+  provenance, OCI referrer storage. PipelineRun-level, async, observe-only-safe.
+- **cosign** is a verify/debug CLI — Flux `spec.verify`, the reconstruction check,
+  operators. Not in build steps where Chains already signs.
+- **`crane` / `oras`** are narrow OCI-op CLIs: host-side verification in the test
+  scripts, referrer attach (Slice 4). Not in the build path.
+- **`reconstruct.sh`** (Slice 6) is the ground-truth verifier — rebuilds the
+  chain from `SHA` + `digests.cue`, asserts every digest matches deployed state.
+- **Flux** (Slice 5) owns the app's declarative deploy; `cv_gitops` (a separate
+  repo, plain digest-pinned manifest — no Timoni) is the git source of truth it
+  reconciles.
+
+### Operational rules (CNB)
+
+1. **One problem, one owner.** deps → npm/lockfile; image production → the CNB
+   lifecycle; orchestration → Tekton; intermediate artifacts → the per-run PVC;
+   registry → zot; CVE policy → Trivy; SBOM → the lifecycle; signing + provenance
+   → Chains; deploy-time verification → Flux `spec.verify`; ground-truth
+   verification → `reconstruct.sh`; deploy → Flux (Slice 5).
+2. **Prefer deletion over abstraction.** The pivot is the worked example.
+3. **arm64 only, no QEMU.** Multi-arch is out of scope (Q2). The
+   `nodeSelector: kubernetes.io/arch: arm64` on the pipeline pods is a
+   correctness assertion, not a portability hedge.
+4. **No local-only release design** beyond the documented registry-trust node
+   step.
+5. **Build once.** Never rebuild during promotion.
+6. **Deploy by digest.** Tags aid humans; Kubernetes and Flux receive the digest.
+7. **No mutable base images.** Digest-pinned in `digests.cue`; a bump is a
+   reviewed commit.
+8. **Keep the workspace temporary.** The PVC holds pipeline artifacts; zot holds
+   durable release artifacts.
+9. **Minimize the runtime image *within the builder's run image*.** cv_oci does
+   not control the run-image contents — `heroku/heroku:24` is a full Ubuntu base
+   with a shell and `npm` (Q1, 2026-09-01; a distroless run-image probe failed at
+   export). What cv_oci controls: keep the launch layer to production deps +
+   assets, and let the Slice 3 CVE gate scan the run image. `debt.md` carries the
+   compromise + the upgrade trigger.
+10. **Security evidence is attached, not scattered.** OCI referrers.
+11. **Separate identities.** Per-stage SAs (done). No omnipotent CI SA.
+12. **Security changes are normal commits** — builder/run-image bump, CVE-policy
+    change, Chains-config change: reviewed, tested, bisectable.
+13. **Avoid silent fallback.** Fail rather than continue on: build reproducibility
+    drift; SBOM layer missing; CVE gate unavailable; CVE verdict irreproducible
+    at the pinned DB; signature invalid; provenance absent; built digest ≠ pushed
+    digest; Flux `spec.verify` failure; reconstruction digest mismatch.
+14. **Add enforcement only after understanding verification.** manual `cosign
+    verify` → Flux `spec.verify` at reconcile (Slice 5) → `reconstruct.sh` as a
+    CronJob (Slice 6) → admission control only if ever.
+15. **Every new dependency needs an exit test.** What exact problem it solves;
+    which existing component can't; what complexity it adds; how it is removed.
+
+### Security model (CNB)
+
+- **Input verification.** Builder + run + step images digest-pinned; `npm ci`
+  lockfile-driven; `npm audit signatures` in `cv_frontend`'s tests. General
+  vulnerability policy is Trivy's (Slice 3).
+- **Workspace boundary.** `fetch` writes source; `build` owns `/layers`; `scan` /
+  `smoke` / `deploy` get no workspace write. `fetch` strips `.git` so the source
+  tree the lifecycle sees is exactly the checked-out files (Slice 2).
+- **Tekton hardening** (default step posture, applied): `runAsNonRoot: true`,
+  `runAsUser: 1000`, `allowPrivilegeEscalation: false`, `capabilities.drop:
+  [ALL]`, `seccompProfile: RuntimeDefault`, `automountServiceAccountToken: false`
+  where not needed. Exception until Slice 1.7: the `build` task's `prepare` step
+  runs uid 0 (`debt.md`).
+- **Registry auth** (Slice 5): htpasswd on zot — anonymous pull denied, one CI
+  credential wired through the `build` task's `dockerconfig` workspace + a Flux
+  `imagePullSecret`. htpasswd-over-plain-HTTP puts Basic-auth creds on the wire
+  in the clear — acceptable on the loopback solo cluster, TLS mandatory at any
+  non-loopback hop (`debt.md`). Release-write separation is structural, not
+  authz: the pipeline only ever pushes candidates to `cv/`; releases are declared
+  in `cv_gitops` (a repo the pipeline reaches only via a narrow deploy key).
+- **Signing.** Chains signs the app digest async (Slice 4). Dev = cosign key as a
+  K8s Secret; KMS = the OpenBao arc (not planned).
+- **Provenance.** PipelineRun-level SLSA (`slsa/v2alpha4`). Names the
+  `cv_frontend` SHA, the git-resolved pipeline definition (git resolver, from
+  GitHub), the builder + run-image + buildpack digests, the app digest, every
+  pinned input. Normalized to be content-addressable if probe P8 allows.
+- **Deployment trust.** Signing is not protection unless the consumer verifies.
+  Two layers: Flux `GitRepository.spec.verify` cosign-gates the reconcile
+  (Slice 5, deploy-time, in-path); `reconstruct.sh` rebuilds the whole chain and
+  checks digests (Slice 6, out-of-path, ground truth). Deploy by digest
+  throughout.
+- **Negative space.** No separate verify PipelineRun (CM-1-A superseded). The
+  build task has no signing credentials and no deploy rights. The deploy path has
+  no source write and no image-build privileges — its only outbound write is a
+  `git push` to `cv_gitops` via a scoped deploy key (commits are unsigned; the
+  trust anchor is the cosign-signed image digest the manifest references).
+  `cv-build-sa` mounts no token. The runtime image has no tooling *added* beyond
+  what `heroku/heroku:24` ships — a recorded compromise (Rule 9).
+
+### Test layers (CNB)
+
+1. **Repository validation** (`validate.sh`): kubeconform against pinned schemas;
+   no hard-coded image refs outside `digests.cue`.
+2. **Application tests** (`cv_frontend`): unit, integration, server startup;
+   `npm ci` + `npm audit signatures`.
+3. **Script unit tests** (bats): `digests.cue` / `gen-digests` idempotence;
+   `validate.sh` fixture pass/fail.
+4. **Build-output test** (`e2e.sh`): `APP_IMAGE_DIGEST` is `sha256:<64hex>`; the
+   image is in zot; the launch layer carries the `optionalDependencies` arm64
+   binaries (gate-zero assertion — keep it).
+5. **Build reproducibility** (`repro.sh`, Slice 2): two independent builds of one
+   SHA → identical app-layer + SBOM-layer content hash + identical outer digest.
+6. **Deploy-by-digest test** (`e2e.sh`): the `cv` Deployment image is
+   `<zot>/cv@sha256:<digest>`; `imagePullPolicy` set; the pod `imageID` carries
+   the digest; `/healthz` → 200; `cv-deploy-state` records digest + app-sha +
+   PipelineRun. (Slice 5 moves the deploy path to Flux — the assertions follow.)
+7. **Negative pipeline test** (`negative.sh`): bad ref → `fetch` fails, nothing
+   downstream; pre-`/healthz` SHA → `build` ok, `smoke` fails, `deploy` skipped,
+   teardown runs, nothing deployed.
+8. **SBOM-presence test** (Slice 3): the `sbom.sha` layer is present, parses as
+   CycloneDX + SPDX, names the production deps + the Node runtime.
+9. **Reproducible-CVE-verdict test** (Slice 3): a known-fixable-CVE fixture fails
+   the gate readably; a clean image passes; re-running at the pinned DB digest
+   gives the identical verdict; the `(image, DB) → verdict` record is written.
+10. **Signature test** (Slice 4): `cosign verify` passes; a tampered image fails.
+11. **Reproducible-provenance test** (Slice 4, `repro.sh` extension): two builds
+    of one SHA → identical provenance predicate digest (or the P8 fallback gap is
+    documented); predicate names the expected pipeline + tasks + pinned inputs +
+    `cv_frontend` SHA.
+12. **Deterministic-manifest test** (Slice 5): regenerating the `cv_gitops`
+    manifest from `(app digest, template)` is byte-identical; Flux reconciles to
+    the pushed digest; a manual `kubectl edit` is reverted; `spec.verify` gates
+    the reconcile; a tampered `cv_gitops` commit fails.
+13. **Reconstruction test** (Slice 6, `reconstruct.sh`): given only
+    `cv_frontend@SHA` + `digests.cue`, every rebuilt artifact digest matches the
+    deployed state; a tampered deployed digest is named as a mismatch.
+
+Retired layers — release-tree tests, workspace-boundary write tests, manual
+OCI-assembly tests, multi-arch index test — described the crane/apko pipeline and
+have no CNB equivalent.
+
+### Glossary
+
+- **CNB** — Cloud Native Buildpacks. `/cnb/lifecycle/creator` + a builder image +
+  buildpacks.
+- **Lifecycle** — the CNB binary set (`detector`/`analyzer`/`restorer`/`builder`/
+  `exporter`), run in one shot by `creator`. `heroku` build: 0.21.18.
+- **Builder image** — `heroku/builder:24`; carries the lifecycle + the
+  `heroku/nodejs` buildpack + the build-time base.
+- **Run image** — `heroku/heroku:24`; the launch-time base the app layer stacks
+  on. Full Ubuntu 24.04 (Q1).
+- **`heroku/nodejs`** — a monolithic buildpack (detect + `npm ci` + launch in
+  one), not decomposed into `node-engine`/`npm-install`/`npm-start` like Paketo.
+  Matters only for `cv_packs`.
+- **App layer** — the single lifecycle-produced layer holding the checked-out
+  `cv_frontend` source under `/workspace/source`.
+- **SBOM referrer** — the CycloneDX/SPDX SBOM attached to the app digest as an
+  OCI referrer (Slice 3).
+- **SLSA provenance** — the `slsa/v2alpha4` predicate Chains attaches, naming the
+  build's input closure (Slice 4).
+- **`SOURCE_DATE_EPOCH`** — not used: the lifecycle pins layer/history timestamps
+  to `1980-01-01T00:00:01Z` by default (Slice 2 finding).
+- **Candidate tag / release alias** — `cv:git-<sha>` is a candidate; a promoted
+  release gets an immutable alias the CI identity cannot overwrite (Slice 5).
 
 ## Open Questions
 
@@ -292,11 +787,14 @@ Delete `tasks/assemble.yaml`, `tasks/build.yaml`, `tasks/resolve.yaml` (folded),
    end to end via the vendored `buildpacks` 0.6 task; the image serves `/healthz`
    and `/` with 200s; the `optionalDependencies` arm64 binaries survive the
    launch prune. **Approach A confirmed.**
-2. **Node version control** — `BP_NODE_VERSION` env var vs tightening
-   `cv_frontend`'s `engines.node`. Decide with the `cv_frontend` prep commit.
-3. **`prepare` root step vs PSA** — does the pipeline namespace need `privileged`
-   PSA, or can the root exception be scoped tighter? Check against the running
-   cluster in Commit 1a.
+2. **Node version control** — RESOLVED 2026-09-01 (T1). `cv_frontend`'s
+   `engines.node` tightened to `>=24.3.0 <25`; `frontend-contract.md` +
+   `digests.cue` bumped to `cv_frontend@cb333ee`. No `BP_NODE_VERSION` needed.
+3. **`prepare` root step vs PSA** — OPEN. Now scoped as **Slice 1.7** (above):
+   `cv-pipeline` has no PSA label today; the only uid-0 actor is the `build`
+   task's `prepare` step, and `fetch` writes the source tree root-owned. Fix:
+   run `fetch` + `build` as uid 1000 + `fsGroup`, delete the chown, go
+   `restricted` (fallback: `baseline` + a documented exception).
 4. **Reproducibility with CNB** — RESOLVED 2026-09-01, Slice 2. The lifecycle
    is already deterministic (SBOM layer + 10/12 layer diffIDs + gzip digests
    matched across two independent builds; `created` is pinned to
@@ -321,7 +819,10 @@ Delete `tasks/assemble.yaml`, `tasks/build.yaml`, `tasks/resolve.yaml` (folded),
   `composites/`, `builders/`, `fixtures/`, `docs/`, `artifacts/` (gitignored).
 - `cv/*` run image, image extensions, the public GHA/ghcr mirror — all `packs`
   concerns, and YAGNI until someone asks.
-- amd64 / multi-arch index — still gated on a real amd64 node.
+- **amd64 / multi-arch — dropped, not deferred** (Q2, 2026-09-01). cv_oci is
+  arm64-only, single node. No `arch` param, no Matrix, no OCI index. Revisit only
+  if a real deploy target or `cv_packs` needs amd64 — and that would be a new
+  design, not a resumed slice.
 
 ## Success Criteria (phased)
 
@@ -343,33 +844,37 @@ no dead crane/apko files; bisect-safe.
 **Slices:** each supply-chain slice lands as its own green, bisect-safe commit
 per the table above.
 
-**Signing (later):** `cosign verify` + `cosign verify-attestation` pass on the
-release; the SLSA predicate names `cv_frontend@SHA` + the builder digest + the
-buildpack group.
+**Slices 3–6 (the reconstruction spine):** each artifact is a deterministic
+function of `cv_frontend@SHA` + `digests.cue` — CVE verdict at a pinned DB
+(Slice 3), content-addressable provenance (Slice 4, probe P8), byte-identical
+regenerated manifest (Slice 5), and `reconstruct.sh` asserts every digest against
+deployed state with zero trust in the operator (Slice 6). Each slice lands as its
+own green, bisect-safe commit.
 
 ## Distribution Plan
 
 - **App image:** built by the vendored `buildpacks` 0.6 task in-cluster, pushed to
-  zot, deployed by digest by Tekton (`kubectl apply` now; Flux `OCIRepository`
-  from the GitOps slice). No external distribution — same as today.
+  zot, deployed by digest — `kubectl apply` now; from Slice 5, Flux reconciles a
+  digest-pinned manifest in the `cv_gitops` repo. No external distribution.
 - **CI/CD:** the pipeline is its own CI/CD, `tkn`-triggered now; a Tekton Trigger
-  on `cv_frontend` push stays a TODO (needs the signing slice stable first).
+  on `cv_frontend` push stays a TODO (needs Slice 4 stable first, and a separate
+  `cv_gitops` repo so the trigger can't self-fire on deploy commits).
 
 ## Dependencies
 
-- **`cv_frontend` Node-version prep** — blocks gate zero.
-- **zot seed** (Slice 1.5 two-address plain-HTTP path) — blocks Commit 1a.
-- **Gate zero result** — decides Approach A vs C.
-- **Demote `pipeline-restructure.md` / `pipeline-gitops-replan.md`** — in Commit
-  0 (CEO review), not later.
+- **Push `cnb-pivot`** (or merge to `main` + push) — Slice 4's git-resolved
+  pipeline needs `pipeline.yaml` reachable from GitHub.
+- **`cv_gitops` repo created** — blocks Slice 5.
+- Historical (done): `cv_frontend` Node-prep → gate zero; zot seed → Commit 1a;
+  gate-zero result → Approach A; old-doc demotion → Commit 0.
 
 ## Next Steps
 
-**Status: T1, T2 (gate zero), and Commit 1a done — the CNB pipeline `cv-cnb`
-runs green end to end alongside `cv-slice1`; `e2e-cnb.sh` (11/11) and
-`negative-cnb.sh` pass. Builder is `heroku/builder:24` (Paketo has no arm64
-build). zot pull path is one address, not two (OrbStack `k8s.expose_services`
-+ daemon `insecure-registries`).**
+**Status (2026-09-01): through Slice 2. One Pipeline `cv-build`
+(`pipeline/pipeline.yaml`), crane/apko gone. `e2e.sh` 11/11, `negative.sh`
+10/10, `repro.sh` 3/3 against the live OrbStack cluster. Builder
+`heroku/builder:24` (arm64 child); run image `heroku/heroku:24`. zot pull path
+is one address (OrbStack service DNS + daemon `insecure-registries`).**
 
 1. **DONE — `cv_frontend` commit — Node pin.** `engines.node` → `>=24.3.0 <25`;
    `frontend-contract.md` + `digests.cue` bumped (`cv_frontend@cb333ee`).
@@ -394,17 +899,23 @@ build). zot pull path is one address, not two (OrbStack `k8s.expose_services`
    `scripts/{smoke,deploy}.sh` (fold into the CNB pipeline or keep as the
    inline logic's source), `scripts/test/{e2e,negative}.sh`. Rename `-cnb`
    tests into place. One green pipeline, `validate.sh` green.
-5. **Slice commits** per the migration table:
-   - **DONE — per-stage SAs.** `cv-pipeline-sa` split into `cv-build-sa` (no
-     RBAC, no token) / `cv-smoke-sa` / `cv-deploy-sa`, wired via
-     `taskRunSpecs`. Commit `d956572`.
-   - **DONE — determinism.** `scripts/test/repro.sh` + the `.git`-strip fix in
-     `fetch`. Open Question 4 resolved. Repro CronJob → TODOS.md.
-   - next: CVE + SBOM → Chains (with the provenance-authoring work) →
-     multi-arch → promotion → GitOps → OpenBao.
-   Merge `pipeline-restructure.md`'s reference material into a single SSOT
-   after 1b.
+5. **Slice commits** — full specs in "The supply-chain slices" above:
+   - **DONE — Slice 1.5 per-stage SAs.** `d956572`.
+   - **DONE — Slice 2 determinism.** `30cd4c7`. Open Question 4 resolved.
+   - **DONE — SSOT merge + eng review (this revision).** Slices 3–6 re-spec'd
+     around the reconstruction spine; CM-1-A superseded (no verify run); multi-arch
+     / zot NetworkPolicy / Timoni-for-app / OpenBao-as-slice all dropped;
+     runtime-image + SBOM posture decided; `pipeline-restructure.md` +
+     `pipeline-gitops-replan.md` ready to delete.
+   - **next: Slice 1.7** (PodSecurity → `restricted`) → **Slice 3** (reproducible
+     CVE verdict + SBOM-presence test) → **Slice 4** (Chains: sign + reproducible
+     provenance + referrers; probes P8/P9/P10) → **Slice 5** (GitOps via
+     `cv_gitops`; probe P5) → **Slice 6** (`reconstruct.sh` capstone).
+   - **Blocked / prereq:** push `cnb-pivot` (or merge to main + push) so the git
+     resolver can reach `pipeline.yaml` — Slice 4 needs it for `refSource`.
 6. **`packs` project** — separate, later, its own design doc.
+7. **`cv_gitops` project** — new repo, created when Slice 5 starts, its own
+   design doc (like `cv_packs`).
 
 ## What I noticed about how you think
 
@@ -422,18 +933,49 @@ build). zot pull path is one address, not two (OrbStack `k8s.expose_services`
   project goals. Most people answer with a feature. You answered with a property
   of the history.
 
+## Implementation Tasks
+
+Synthesized from the 2026-09-01 SSOT-merge eng review. Each derives from a
+specific finding. JSONL: `~/.gstack/projects/InSuperposition-cv_oci/tasks-eng-review-20260901-213425.jsonl`.
+
+- [ ] **T1 (P2, human: ~30min / CC: ~5min)** — `tasks/buildpacks.yaml` — parse the
+  keyed run-image digest from `report.toml`, not the first `digest` line.
+  - Surfaced by: outside voice E — `:198` `grep "digest" report.toml | cut` takes
+    the first match; `report.toml` can carry `[image]` and `[run-image]` digests.
+    Latent silent wrong-image bug; every downstream check still passes.
+  - Verify: a bats/unit assertion that the parsed digest == the pinned run-image
+    digest; `e2e.sh` still green.
+- [ ] **T2 (P2, human: ~2h / CC: ~20min)** — pipeline — Slice 1.7: run `fetch` +
+  `build` as `runAsUser: 1000` + `fsGroup`, delete `prepare`'s chown, label
+  `cv-pipeline` `enforce=restricted`.
+  - Surfaced by: Section 1 + outside voice F — `prepare` runs uid 0; `fetch`
+    writes the tree root-owned; `fsGroup` doesn't chown existing files.
+  - Files: `pipeline/pipeline.yaml`, `tasks/buildpacks.yaml`,
+    `manifests/namespace.yaml`.
+  - Verify: `e2e.sh` + `negative.sh` + `repro.sh` green; `kubectl auth can-i`
+    shows no SA can run a privileged pod.
+- [ ] **T3 (P3, human: ~15min / CC: ~3min)** — docs — delete
+  `pipeline-restructure.md` + `pipeline-gitops-replan.md` +
+  `pipeline-restructure-review-2026-08-30.md` (SSOT merge complete).
+  - Surfaced by: the SSOT merge — all still-valid content is now in this doc.
+  - Verify: `grep -r pipeline-restructure docs/` returns only historical mentions.
+- [ ] **T4 (P3, human: ~15min)** — git — push `cnb-pivot` (or merge to `main` +
+  push) so the git resolver can reach `pipeline.yaml`.
+  - Surfaced by: Slice 4 dependency — `status.provenance.refSource` needs the
+    pipeline git-resolved from GitHub.
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
-| CEO Review | `/plan-ceo-review` | Scope & strategy | 3 | issues_open (folded) | this run: HOLD_SCOPE — decouple confirmed, `cv_packs` deferred (option A), doc demotion moved to Commit 0; 3 AUQ decisions answered. Prior runs (2026-09-01) graded the superseded crane/apko re-plan. |
-| Codex Review | `/codex review` | Independent 2nd opinion | 2 | issues_found | Codex `exec` timed out on this repo every attempt (5-min, ~0 output — logged); Claude subagent ran both times |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 3 | issues_open (folded) | SCOPE_REDUCED — 13 findings, 1 critical gap (Node-25 resolution, closed by task T1); all 10 AUQ decisions answered |
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 3 | issues_open (folded) | 2026-09-01: HOLD_SCOPE — `cv_packs` decouple confirmed, doc demotion → Commit 0. Graded the pivot plan. |
+| Codex Review | `/codex review` | Independent 2nd opinion | 3 | issues_found (folded) | `codex exec` stalls on this repo every attempt (logged); Claude subagent ran all three. This run: 15 findings on the SSOT-merge back half. |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 4 | issues_open (folded) | 2026-09-01 SSOT-merge run: 9 findings + 15 outside-voice findings, all folded. 0 critical gaps. 13 AUQ decisions. Back half re-architected around verification-by-reconstruction; CM-1-A superseded. |
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | n/a (infra) |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
 
-- **CODEX:** `codex exec` stalled on this repo every attempt (5-min timeout, ~0 output) — logged learning `codex-exec-stalls-cv-oci-confirmed`. Claude subagent outside voices ran instead (16 findings at eng review).
-- **CROSS-MODEL:** office-hours Codex cold-read and the eng-review outside voice agree the reference lane + slice migration is the real portfolio piece and disagree with the original office-hours doc on the `cv/*` buildpack suite. The user adopted the decouple; the CEO review confirmed it (`cv_packs` deferred, not killed, not capstoned).
-- **VERDICT:** CEO + ENG REVIEW COMPLETE — HOLD SCOPE, plan revised and confirmed. Not "clean" (1 eng critical gap with fix task T1). Ready to implement: T1 (Node pin) → T2 (gate zero + doc demotion). Design review not required (infra). Next action is code, not another review.
+- **CODEX:** `codex exec` stalled again (learning `codex-exec-stalls-cv-oci-confirmed`, 4+ attempts). Claude subagent outside voice ran instead — 15 findings, the sharpest being that the doc-under-review still described the superseded slice plan (now fixed) and that the two-run verify design (CM-1-A) is machinery for a downstream-consumer problem this cluster doesn't have.
+- **CROSS-MODEL:** the outside voice and the interactive review converged — both landed on "sculpt the back half, the reconstruction check replaces the materials assertion." The user's three steers (separation of concerns → negative space → determinism + innovation) drove the final shape: CM-1-A superseded, Timoni cut from the app deploy, OpenBao de-scheduled, and the reconstruction spine adopted as the organizing idea.
+- **VERDICT:** ENG REVIEW COMPLETE — plan revised. Not "clean" (T1 is a real latent bug in shipped code; T2 sharpens Slice 1.7). Slices 1.5 + 2 shipped (`d956572`, `30cd4c7`). Ready to implement: T1/T2, then Slice 1.7 → 3 → 4 → 5 → 6. `pipeline-restructure.md` + `pipeline-gitops-replan.md` are fully absorbed — delete (T3). Design review not required (infra). Probes P5/P8/P9/P10 are Slice-time prerequisites, spec'd in the probe table — run each before its slice.
 
 NO UNRESOLVED DECISIONS

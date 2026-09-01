@@ -1,9 +1,10 @@
 # cv_oci
 
 A Tekton + Cloud Native Buildpacks supply-chain pipeline. Learning + portfolio
-artifact. Design of record: `docs/designs/buildpacks-pivot.md`
-(`pipeline-restructure.md` + `pipeline-gitops-replan.md` are SUPERSEDED — the
-crane/apko approach they describe was retired in the CNB pivot).
+artifact. Design of record: `docs/designs/buildpacks-pivot.md` (the sole design
+doc — the earlier crane/apko `pipeline-restructure.md` /
+`pipeline-gitops-replan.md` were absorbed and deleted in the 2026-09-01 SSOT
+merge).
 
 ## Skill routing
 

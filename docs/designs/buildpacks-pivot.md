@@ -361,20 +361,35 @@ buildpack group.
 
 ## Next Steps
 
-1. **`cv_frontend` commit — Node pin.** Bound `engines.node` to `~24.3`; update
-   `frontend-contract.md`; bump the pinned fixture SHA in `digests.cue`.
-2. **Commit 0 — gate zero record + demote old docs** (docs-only cv_oci commit).
+**Status: T1, T2 (gate zero), and Commit 1a done — the CNB pipeline `cv-cnb`
+runs green end to end alongside `cv-slice1`; `e2e-cnb.sh` (11/11) and
+`negative-cnb.sh` pass. Builder is `heroku/builder:24` (Paketo has no arm64
+build). zot pull path is one address, not two (OrbStack `k8s.expose_services`
++ daemon `insecure-registries`).**
+
+1. **DONE — `cv_frontend` commit — Node pin.** `engines.node` → `>=24.3.0 <25`;
+   `frontend-contract.md` + `digests.cue` bumped (`cv_frontend@cb333ee`).
+2. **DONE — Commit 0 — gate zero record + demote old docs** (docs-only cv_oci commit).
    Run a throwaway TaskRun: vendored `buildpacks` 0.6 task + a stock Paketo arm64
    builder against `cv_frontend@SHA`; assert per Success Criteria. Commit:
    `docs/gate-zero.md` (the result), `Status: SUPERSEDED by
    docs/designs/buildpacks-pivot.md` headers on `pipeline-restructure.md` +
    `pipeline-gitops-replan.md`, and this doc's status. Decides A / C.
-3. **Commit 1a — CNB pipeline alongside old.** New `pipeline-cnb.yaml`,
-   `e2e-cnb.sh`, `negative-cnb.sh`, vendored task, `digests.cue` builder entry,
-   `dockerconfig` Secret wiring, `prepare`-root exception in `debt.md`. Both
-   pipelines green.
-4. **Commit 1b — delete the crane/apko pipeline** (files listed above), rename
-   `-cnb` tests into place, one green pipeline.
+3. **DONE — Commit 1a — CNB pipeline alongside old.** `pipeline/pipeline-cnb.yaml`
+   (`fetch → build → smoke → deploy`, resolve folded into fetch, inline
+   smoke/deploy — no pipeline-utils), vendored `tasks/buildpacks.yaml` 0.6,
+   `manifests/zot/` seed, `digests.cue` cnb* keys, `scripts/{smoke,deploy}.sh`
+   pull-policy env, `scripts/test/{e2e-cnb,negative-cnb}.sh`, `bootstrap.sh`
+   phase 5, `debt.md` + `runbook.md`. Commits `f77c9db` (+tests/bootstrap
+   follow-up). No `dockerconfig` Secret — zot is unauth in the seed.
+4. **Commit 1b — delete the crane/apko pipeline.** `tasks/{assemble,build,resolve}.yaml`,
+   `pipeline/pipeline.yaml`, `scripts/assemble-image.sh`, `scripts/resolve-sha.sh`
+   + its bats, `bootstrap/build-pipeline-utils.sh`, `bootstrap/pipeline-utils/`,
+   `scripts/check-toolchain.sh`, `bootstrap.sh` phase 4, the `params.yaml` /
+   `digests.cue` `nodeBuild` + `pipelineUtils` + `distrolessNode` entries,
+   `scripts/{smoke,deploy}.sh` (fold into the CNB pipeline or keep as the
+   inline logic's source), `scripts/test/{e2e,negative}.sh`. Rename `-cnb`
+   tests into place. One green pipeline, `validate.sh` green.
 5. **Slice commits** per the migration table: per-stage SAs → determinism → CVE +
    SBOM → Chains (with the provenance-authoring work) → multi-arch → promotion →
    GitOps → OpenBao. Merge `pipeline-restructure.md`'s reference material into a

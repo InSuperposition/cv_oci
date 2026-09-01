@@ -17,6 +17,8 @@ metadata:
   name: cv-cnb
 spec:
   params:
+    # Full image refs (repo@sha256:...), fed from digests.cue via params.yaml /
+    # bootstrap.sh. builder + run image must be the arm64 CHILD digest.
     - { name: builder-image, type: string }
     - { name: run-image, type: string }
     - { name: utility-image, type: string }
@@ -74,9 +76,9 @@ spec:
       workspaces: [{ name: source, workspace: shared }]
       params:
         - { name: APP_IMAGE, value: "$(params.app-repo):git-$(params.frontend-ref)" }
-        - { name: BUILDER_IMAGE, value: "docker.io/heroku/builder:24@$(params.builder-image)" }
-        - { name: RUN_IMAGE, value: "docker.io/heroku/heroku:24@$(params.run-image)" }
-        - { name: UTILITY_IMAGE, value: "docker.io/library/bash@$(params.utility-image)" }
+        - { name: BUILDER_IMAGE, value: "$(params.builder-image)" }
+        - { name: RUN_IMAGE, value: "$(params.run-image)" }
+        - { name: UTILITY_IMAGE, value: "$(params.utility-image)" }
         - { name: SOURCE_SUBPATH, value: "app" }
         - { name: SKIP_RESTORE, value: "true" }
         - { name: CNB_INSECURE_REGISTRIES, value: "$(params.insecure-registries)" }

@@ -5,6 +5,25 @@ triggers) — this is new work not yet scheduled into a slice.
 
 ## P2
 
+### cv_packs — the decoupled buildpack suite
+- **What:** design doc + first commits for `github.com/InSuperposition/cv_packs`
+  (empty repo, created 2026-09-01; local scaffold `../packs/`). A hand-authored,
+  capability-oriented Node/npm buildpack suite (`cv/node-engine`,
+  `cv/npm-install`, `cv/npm-build`, `cv/npm-start`, composite `cv/node-npm-app`),
+  built as a conformance lab that diffs against the stock Paketo lane.
+- **Why:** the office-hours "goal 2" (learn CNB buildpack authoring). Pulled out
+  of cv_oci in the 2026-09-01 eng review because coupling it to cv_oci's
+  `BUILDER_IMAGE` repeated the over-engineering the pivot cures and tied cv_oci's
+  bisect-safety to an ephemeral single-node zot.
+- **Context:** `docs/designs/buildpacks-pivot.md` → Deferred. Collapse the 7
+  scaffold dirs (they collide with CNB reserved terms) to
+  `buildpacks/ composites/ builders/ fixtures/ docs/ artifacts/`. Directory name
+  == buildpack id. **Lead with `cv/npm-build`** — the one buildpack with real
+  resolution logic; the other three are trivial. `cv_frontend` is one fixture;
+  add a plain-TS fixture (has a build script) for `npm-build`.
+- **Effort:** L (human) / M (CC), spread over many commits.
+- **Depends on:** the cv_oci CNB curriculum being further along; never blocks it.
+
 ### Portability CI check (kind / k3d)
 - **What:** scheduled run of `bootstrap.sh` + the Slice 1 pipeline on a vanilla
   kind or k3d cluster.
@@ -29,6 +48,24 @@ triggers) — this is new work not yet scheduled into a slice.
   before the pipeline itself does multi-arch assembly (Slice 5).
 - **Effort:** M.
 - **Depends on:** "Portability CI check" above / Slice 5.
+
+### zot retention policy
+- **What:** zot `extensions.retention` config — `keepTags` by count + age,
+  `deleteReferrers: false` so SBOM/signature/provenance referrers survive with
+  their subjects.
+- **Why:** once zot lands (Slice 1.5), every build pushes an image; Slice 1.7
+  adds Tekton Task bundles; Slices 3–4 add SBOM + signature referrers. Nothing
+  GCs any of it. On OrbStack the zot PVC fills silently and `assemble` starts
+  failing with a cryptic push error.
+- **Context:** raised in the 2026-09-01 CEO review of the GitOps re-plan
+  (finding 7). Implement at **Slice 6**, alongside authz + immutability +
+  promotion — retention and immutability interact (a promoted release alias
+  must not be GC'd), so tuning it before Slice 4 referrers and Slice 6 aliases
+  exist risks deleting something a later slice needs. Interim (in the Slice 1.5
+  zot seed): a 10Gi PVC, a `df` warning in a `bootstrap.sh` check, and a
+  `docs/runbook.md` "zot PVC full → manual GC" entry.
+- **Effort:** S.
+- **Depends on:** Slice 6.
 
 ## P3
 

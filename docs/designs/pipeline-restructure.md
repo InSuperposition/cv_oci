@@ -1,6 +1,14 @@
 # cv_oci — Multi-Architecture Tekton Supply-Chain Pipeline
 
-Status: ACTIVE (sole source of truth)
+Status: SUPERSEDED by `docs/designs/buildpacks-pivot.md` (2026-09-01).
+The `crane` + `apko` + no-Dockerfile premise this doc is built on was retired in
+the Cloud Native Buildpacks pivot. The still-valid content (the slice designs for
+zot, Chains, promotion, GitOps; the operational rules; the glossary; the test
+layers) is carried forward via the "Relationship to the old slice plan" table in
+`buildpacks-pivot.md` and will be merged into a single SSOT after the CNB
+reference lane (Commit 1b) lands. Do not plan against this doc.
+
+Prior status: ACTIVE (sole source of truth).
 Supersedes: the `plan/` directory (deleted 2026-08-30) and the /office-hours
 draft of 2026-08-29.
 Review record (the "why" behind every decision here):

@@ -50,11 +50,14 @@ spec:
           - name: clone-and-assert
             image: $(params.image)
             workingDir: $(workspaces.source.path)
-            # Slice 1.7: uid 1000 so the checked-out tree is 1000-owned from
-            # creation. fsGroup 1000 (PipelineRun podTemplate) makes the PVC
-            # group-writable; the `build` task's steps then read/delete it
-            # without a root chown. Full restricted set for PSA admission.
-            securityContext:
+            # Slice 1.7: every inline step runs uid 1000, PSA-restricted, so
+            # cv-pipeline can enforce `restricted`. `set-security-context=true`
+            # only covers Tekton's own injected containers, not these. The
+            # anchor is reused by smoke / deploy / teardown below. For `fetch`
+            # specifically, uid 1000 also means the checked-out tree is
+            # 1000-owned from creation (with fsGroup 1000 on the podTemplate),
+            # so the `build` task needs no root chown.
+            securityContext: &restricted-sc
               runAsNonRoot: true
               runAsUser: 1000
               runAsGroup: 1000
@@ -114,6 +117,7 @@ spec:
         steps:
           - name: smoke
             image: $(params.image)
+            securityContext: *restricted-sc  # Slice 1.7
             script: |
               #!/usr/bin/env bash
               set -euo pipefail
@@ -176,6 +180,7 @@ spec:
         steps:
           - name: deploy
             image: $(params.image)
+            securityContext: *restricted-sc  # Slice 1.7
             script: |
               #!/usr/bin/env bash
               set -euo pipefail
@@ -243,6 +248,7 @@ spec:
         steps:
           - name: teardown
             image: $(params.image)
+            securityContext: *restricted-sc  # Slice 1.7
             script: |
               #!/usr/bin/env bash
               kubectl -n "$(params.namespace)" delete deploy,svc -l "cv-oci/smoke=$(params.run-id)" --ignore-not-found --wait=false || true

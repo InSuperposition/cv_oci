@@ -149,7 +149,11 @@ check "running Pod imageID carries the built digest" test "$pod_matches" = yes
 
 check "the image is really in zot" crane digest --insecure "$want_ref"
 
-code="$(kubectl -n "$NS" run e2e-probe --image="$KUBECTL_IMG" --restart=Never --rm -i --quiet --timeout=60s --command -- \
+# The probe pod needs its own restricted securityContext — $NS enforces PSA
+# `restricted` (Slice 1.7). Strategic-merge it onto the generated e2e-probe container.
+PROBE_SC='{"spec":{"containers":[{"name":"e2e-probe","securityContext":{"runAsNonRoot":true,"runAsUser":1000,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}'
+code="$(kubectl -n "$NS" run e2e-probe --image="$KUBECTL_IMG" --restart=Never --rm -i --quiet --timeout=60s \
+	--override-type=strategic --overrides="$PROBE_SC" --command -- \
 	curl -s -o /dev/null -m 10 -w '%{http_code}' "http://cv.${NS}.svc.cluster.local/healthz" 2>/dev/null || true)"
 check "deployed /healthz returns 200" test "$code" = "200"
 

@@ -376,14 +376,18 @@ Small; closes a standing question, unblocks nothing downstream.
 - **Acceptance:** `cv-pipeline` enforces `restricted` (or `baseline` on the
   fallback); `e2e.sh` + `negative.sh` + `repro.sh` stay green; no SA can schedule
   a privileged pod (`kubectl auth can-i`).
-- **Status:** the clean fix landed as code — `manifests/namespace.yaml`
-  (`enforce=restricted`), `bootstrap.sh` phase 2 (`set-security-context=true` +
-  controller restart), `pipeline.yaml` `fetch` step and `tasks/buildpacks.yaml`
-  `stepTemplate` both carry the full restricted `securityContext`, `prepare`'s
-  `chown` is deleted. **Live verification is still pending** — the acceptance
-  suites have not been run against a `restricted` `cv-pipeline` on a cluster
-  with `set-security-context=true`. Until they pass green this slice is not
-  done and the `debt.md` row stays.
+- **Status: DONE (2026-09-01).** The clean fix landed —
+  `manifests/namespace.yaml` (`enforce=restricted`), `bootstrap.sh` phase 2
+  (`set-security-context=true` + controller restart), and the full restricted
+  `securityContext` on `pipeline.yaml`'s `fetch` step (a YAML anchor reused by
+  `smoke`/`deploy`/`smoke-teardown`) and `tasks/buildpacks.yaml`'s
+  `stepTemplate`; `prepare`'s `chown` deleted. The `e2e.sh` `/healthz` probe
+  pod also got a restricted `securityContext` (strategic-merge override).
+  `set-security-context=true` covers only Tekton's own injected containers, so
+  every user step needed its own block. Verified green under `restricted`:
+  `e2e.sh` (11/11), `negative.sh`, `repro.sh` (still byte-reproducible). The
+  pipeline SAs cannot create pods (RBAC) and the namespace rejects
+  non-compliant pods (PSA).
 
 #### Slice 3 — reproducible CVE verdict + SBOM-presence test
 
@@ -915,12 +919,17 @@ is one address (OrbStack service DNS + daemon `insecure-registries`).**
      / zot NetworkPolicy / Timoni-for-app / OpenBao-as-slice all dropped;
      runtime-image + SBOM posture decided; `pipeline-restructure.md` +
      `pipeline-gitops-replan.md` ready to delete.
-   - **next: Slice 1.7** (PodSecurity → `restricted`) → **Slice 3** (reproducible
-     CVE verdict + SBOM-presence test) → **Slice 4** (Chains: sign + reproducible
-     provenance + referrers; probes P8/P9/P10) → **Slice 5** (GitOps via
-     `cv_gitops`; probe P5) → **Slice 6** (`reconstruct.sh` capstone).
-   - **Blocked / prereq:** push `cnb-pivot` (or merge to main + push) so the git
-     resolver can reach `pipeline.yaml` — Slice 4 needs it for `refSource`.
+   - **DONE — Slice 1.7 PodSecurity → `restricted`.** `fetch` + all `buildpacks`
+     steps + the inline `smoke`/`deploy`/`smoke-teardown` steps run uid 1000
+     with the full restricted `securityContext`; `prepare`'s `chown` gone;
+     `set-security-context=true`; `e2e`/`negative`/`repro` green under
+     `restricted`.
+   - **DONE — T4 prereq.** `cnb-pivot` pushed to `origin` — the git resolver
+     can reach `pipeline.yaml` for Slice 4's `refSource`.
+   - **next: Slice 3** (reproducible CVE verdict + SBOM-presence test) →
+     **Slice 4** (Chains: sign + reproducible provenance + referrers; probes
+     P8/P9/P10) → **Slice 5** (GitOps via `cv_gitops`; probe P5) → **Slice 6**
+     (`reconstruct.sh` capstone).
 6. **`packs` project** — separate, later, its own design doc.
 7. **`cv_gitops` project** — new repo, created when Slice 5 starts, its own
    design doc (like `cv_packs`).
@@ -955,17 +964,16 @@ specific finding. JSONL: `~/.gstack/projects/InSuperposition-cv_oci/tasks-eng-re
     digest; `e2e.sh` still green.
   - **Done** — fix + `scripts/test/report-digest.bats` (4 tests, green).
     Section-aware awk on `[image]`, fails loud on a missing digest.
-- [~] **T2 (P2, human: ~2h / CC: ~20min)** — pipeline — Slice 1.7: run `fetch` +
+- [x] **T2 (P2, human: ~2h / CC: ~20min)** — pipeline — Slice 1.7: run `fetch` +
   `build` as `runAsUser: 1000` + `fsGroup`, delete `prepare`'s chown, label
   `cv-pipeline` `enforce=restricted`.
   - Surfaced by: Section 1 + outside voice F — `prepare` runs uid 0; `fetch`
     writes the tree root-owned; `fsGroup` doesn't chown existing files.
   - Files: `pipeline/pipeline.yaml`, `tasks/buildpacks.yaml`,
-    `manifests/namespace.yaml`, `bootstrap/bootstrap.sh`.
-  - **Code landed; live-verify pending** — see the Slice 1.7 Status note above.
-    Not done until `e2e.sh` + `negative.sh` + `repro.sh` pass green against a
-    `restricted` `cv-pipeline` and `kubectl auth can-i` shows no SA can run a
-    privileged pod.
+    `manifests/namespace.yaml`, `bootstrap/bootstrap.sh`,
+    `scripts/test/e2e.sh`.
+  - **Done (2026-09-01)** — see the Slice 1.7 Status note above. `e2e.sh` +
+    `negative.sh` + `repro.sh` verified green under `restricted`.
 - [x] **T3 (P3, human: ~15min / CC: ~3min)** — docs — delete
   `pipeline-restructure.md` + `pipeline-gitops-replan.md` +
   `pipeline-restructure-review-2026-08-30.md` (SSOT merge complete).

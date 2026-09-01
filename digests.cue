@@ -19,7 +19,7 @@ frontend: {
 	repo:       "https://github.com/InSuperposition/cv_frontend"
 	fixtureSha: #GitSha | ""
 }
-frontend: fixtureSha: "d7f14b797ac83dd618040e65c4a65196eba37b9a"
+frontend: fixtureSha: "cb333ee18646e1d97eab592547fe09cbef83727b"
 
 images: [string]: #Pin
 

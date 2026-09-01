@@ -5,9 +5,10 @@ The `resolve` Task asserts the **paths** section against the checked-out
 `APP_SHA` and fails loud if anything is missing (finding 1c-A). Bump this doc in
 the same commit that bumps the pinned `APP_SHA` when it changes.
 
-Verified against `cv_frontend` @ `d7f14b7` on 2026-08-30 (the `/healthz` +
-fingerprint + router-test commit; the runtime investigation in
-`docs/assignment-findings.md` was against its parent `0bbc684` and still holds).
+Verified against `cv_frontend` @ `cb333ee` on 2026-09-01 (the `engines.node`
+upper-bound commit; its parent `d7f14b7` added `/healthz` + fingerprinting +
+the router test, and the runtime investigation in
+`docs/assignment-findings.md` was against `0bbc684` and still holds).
 
 ## Repo identity
 
@@ -17,7 +18,7 @@ fingerprint + router-test commit; the runtime investigation in
 - Each `cv_oci` commit pins a known-good `cv_frontend` fixture SHA in
   `digests.cue` (`frontend.fixtureSha`) so acceptance is meaningful at any
   checkout (finding codex #13). Currently
-  `d7f14b797ac83dd618040e65c4a65196eba37b9a`.
+  `cb333ee18646e1d97eab592547fe09cbef83727b`.
 
 ## Paths that MUST exist at APP_SHA (asserted by `resolve`)
 
@@ -36,7 +37,10 @@ public/
 ## package.json assumptions
 
 - `"type": "module"` (ESM).
-- `engines.node` satisfied by the runtime base (`nodejs24` → Node 24.x).
+- `engines.node` is `">=24.3.0 <25"` — bounded to the 24.x line. The CNB
+  `node-engine` buildpack resolves the highest Node version satisfying this, so
+  the upper bound keeps the runtime on Node 24.x (matching the pipeline's pinned
+  Node). The floor tracks `remix@3.0.0-beta.10`'s own `engines.node: ">=24.3.0"`.
 - `scripts.start` is `NODE_ENV=production node --import remix/node-tsx server.ts`
   — the pipeline uses this exact shape as the image CMD, it does not call
   `npm start`.

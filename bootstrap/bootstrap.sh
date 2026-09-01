@@ -70,8 +70,8 @@ fi
 # ---- phase 3 -----------------------------------------------------------
 phase 3 "cv-pipeline namespace + RBAC"
 kubectl apply -f manifests/namespace.yaml -f manifests/rbac.yaml >/dev/null
-kubectl -n cv-pipeline get serviceaccount cv-pipeline-sa >/dev/null
-log_kv step=namespace state=ready ns=cv-pipeline sa=cv-pipeline-sa
+kubectl -n cv-pipeline get serviceaccount cv-build-sa cv-smoke-sa cv-deploy-sa >/dev/null
+log_kv step=namespace state=ready ns=cv-pipeline sa="cv-build-sa,cv-smoke-sa,cv-deploy-sa"
 
 if [ "${1:-}" = "--skip-pipeline" ]; then
 	log_kv step=bootstrap result=ok note="stopped after phase 3 (--skip-pipeline)"

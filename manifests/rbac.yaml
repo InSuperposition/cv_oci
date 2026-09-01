@@ -1,43 +1,108 @@
-# Slice 1: one ServiceAccount for the whole pipeline. Split into least-privilege
-# per-stage SAs in Slice 1.5 (design doc).
+# Slice 1.5 — per-stage least-privilege ServiceAccounts.
+#
+# The pipeline has four task stages plus one finally task. They do NOT need the
+# same access, so each runs as its own identity (wired in the PipelineRun via
+# spec.taskRunSpecs; the run's taskRunTemplate.serviceAccountName defaults the
+# rest to cv-build-sa):
+#
+#   fetch, build        -> cv-build-sa    no K8s API calls at all; no token
+#   smoke, smoke-teardown -> cv-smoke-sa  ephemeral Deployment/Service churn
+#   deploy              -> cv-deploy-sa   the real `cv` Deployment/Service +
+#                                         the cv-deploy-state ConfigMap
+#
+# What is deliberately NOT granted anywhere: secrets, the buildpacks task's
+# `dockerconfig` workspace (the zot seed is unauthenticated — no Secret to
+# mount), and Job/batch access (smoke uses a Deployment, not a Job). The
+# `prepare` root step is a PodSecurity concern tracked in docs/debt.md, not an
+# RBAC one.
+
+# --- fetch + build: no cluster access -----------------------------------------
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: cv-pipeline-sa
+  name: cv-build-sa
+  namespace: cv-pipeline
+# git clone + the CNB lifecycle creator never touch the Kubernetes API. No
+# RoleBinding, and no mounted token.
+automountServiceAccountToken: false
+---
+# --- smoke (+ finally teardown): ephemeral run-scoped app ---------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cv-smoke-sa
   namespace: cv-pipeline
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: cv-pipeline-role
+  name: cv-smoke-role
   namespace: cv-pipeline
 rules:
-  # smoke + deploy Tasks: manage the app Deployment/Service and the
-  # run-scoped smoke resources; read pod status + logs; the current-digest
-  # pointer ConfigMap (1e-A).
+  # create the throwaway Deployment/Service, wait on rollout, delete on teardown
   - apiGroups: ["apps"]
     resources: ["deployments", "replicasets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["services", "configmaps"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  # `kubectl logs deploy/<smoke>` on failure
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
-    verbs: ["get", "list", "watch", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: cv-pipeline-rolebinding
+  name: cv-smoke-rolebinding
   namespace: cv-pipeline
 subjects:
   - kind: ServiceAccount
-    name: cv-pipeline-sa
+    name: cv-smoke-sa
     namespace: cv-pipeline
 roleRef:
   kind: Role
-  name: cv-pipeline-role
+  name: cv-smoke-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# --- deploy: the real `cv` Deployment/Service + deploy-state pointer ----------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cv-deploy-sa
+  namespace: cv-pipeline
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cv-deploy-role
+  namespace: cv-pipeline
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # cv-deploy-state: current/previous digest + app-sha + PipelineRun pointer
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # `kubectl get ep cv` on a failed rollout
+  - apiGroups: [""]
+    resources: ["endpoints", "pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cv-deploy-rolebinding
+  namespace: cv-pipeline
+subjects:
+  - kind: ServiceAccount
+    name: cv-deploy-sa
+    namespace: cv-pipeline
+roleRef:
+  kind: Role
+  name: cv-deploy-role
   apiGroup: rbac.authorization.k8s.io

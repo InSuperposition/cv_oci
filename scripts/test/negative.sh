@@ -56,10 +56,14 @@ metadata: { generateName: neg- }
 spec:
   pipelineRef: { name: cv-build }
   taskRunTemplate:
-    serviceAccountName: cv-pipeline-sa
+    serviceAccountName: cv-build-sa
     podTemplate:
       securityContext: { fsGroup: 1000 }
       nodeSelector: { kubernetes.io/arch: arm64 }
+  taskRunSpecs:
+    - { pipelineTaskName: smoke, serviceAccountName: cv-smoke-sa }
+    - { pipelineTaskName: smoke-teardown, serviceAccountName: cv-smoke-sa }
+    - { pipelineTaskName: deploy, serviceAccountName: cv-deploy-sa }
   params:
     - { name: builder-image, value: "$BUILDER" }
     - { name: run-image, value: "$RUN_IMAGE" }

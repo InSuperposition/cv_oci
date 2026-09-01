@@ -37,18 +37,6 @@ triggers) — this is new work not yet scheduled into a slice.
 - **Effort:** M (human) / S (CC).
 - **Depends on:** Slice 1 stable.
 
-### Multi-arch pipeline-utils image
-- **What:** publish the `pipeline-utils` OCI image as a multi-arch index
-  (amd64 + arm64) instead of arm64-only.
-- **Why:** the portability CI (above) and Slice 5's amd64 work both need the
-  pipeline tooling image to run on amd64.
-- **Context:** raised in the 2026-08-30 eng review (CM-E3-A). arm64-only is fine
-  while OrbStack is the only cluster. Mild circularity: the first multi-arch
-  `pipeline-utils` is probably hand-assembled with `crane` from two arch bases,
-  before the pipeline itself does multi-arch assembly (Slice 5).
-- **Effort:** M.
-- **Depends on:** "Portability CI check" above / Slice 5.
-
 ### zot retention policy
 - **What:** zot `extensions.retention` config — `keepTags` by count + age,
   `deleteReferrers: false` so SBOM/signature/provenance referrers survive with

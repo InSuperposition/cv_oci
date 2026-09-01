@@ -1,22 +1,17 @@
 #!/usr/bin/env bash
-# bootstrap.sh — bring an OrbStack cluster from zero to "ready for cv_oci Slice 1".
+# bootstrap.sh — bring an OrbStack cluster from zero to "ready for cv_oci".
 #
 # Ordered, --wait-gated, idempotent. Re-running on a ready cluster is a no-op.
 #
-#   phase 0  host toolchain check (informational)
 #   phase 1  Tekton Pipelines v1.15.1 (vendored, checksum-pinned)
 #   phase 2  verify the git resolver is enabled (on by default in v1.15.1)
 #   phase 3  cv-pipeline namespace + RBAC + ServiceAccount
-#   phase 4  build + docker-load the pipeline-utils image (crane/apko path)
-#   phase 5  zot seed + the CNB pipeline (buildpacks-pivot.md, Commit 1a)
-#
-# Slice 1's crane/apko path (phase 4) and the CNB path (phase 5) both stand up
-# until Commit 1b removes the old one.
+#   phase 4  zot seed + the cv-build pipeline (docs/designs/buildpacks-pivot.md)
 #
 # Per-platform node trust for the CNB pull path (docs/runbook.md) is NOT done
-# here — it changes host config. phase 5 prints the two commands.
+# here — it changes host config. phase 4 prints the two commands.
 #
-# Flags: --skip-pipeline-utils   stop after phase 3 (skips 4 AND 5)
+# Flags: --skip-pipeline   stop after phase 3
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,10 +26,6 @@ TEKTON_YAML="vendor/tekton/pipeline-${TEKTON_VERSION}.yaml"
 TEKTON_SHA256="68da92cc20086184b795dae6ce425c47fe6ca3ee82b288b228bcce76bb4b3c86"
 
 phase() { printf '\n=== phase %s: %s ===\n' "$1" "$2" >&2; }
-
-# ---- phase 0 -----------------------------------------------------------------
-phase 0 "host toolchain"
-scripts/check-toolchain.sh || true
 
 # ---- phase 1 ---------------------------------------------------------------
 phase 1 "Tekton Pipelines ${TEKTON_VERSION}"
@@ -82,31 +73,28 @@ kubectl apply -f manifests/namespace.yaml -f manifests/rbac.yaml >/dev/null
 kubectl -n cv-pipeline get serviceaccount cv-pipeline-sa >/dev/null
 log_kv step=namespace state=ready ns=cv-pipeline sa=cv-pipeline-sa
 
-# ---- phase 4 --------------------------------------------------------
-if [ "${1:-}" = "--skip-pipeline-utils" ]; then
-	log_kv step=bootstrap result=ok note="stopped before phase 4 (--skip-pipeline-utils)"
+if [ "${1:-}" = "--skip-pipeline" ]; then
+	log_kv step=bootstrap result=ok note="stopped after phase 3 (--skip-pipeline)"
 	exit 0
 fi
-phase 4 "pipeline-utils image"
-bootstrap/build-pipeline-utils.sh
 
-# ---- phase 5 --------------------------------------------------------
-phase 5 "zot seed + CNB pipeline"
+# ---- phase 4 --------------------------------------------------------
+phase 4 "zot seed + cv-build pipeline"
 # shellcheck disable=SC1091
 source digests.env
-[ -n "${ZOT:-}" ] || die "phase 5: images.zot not pinned in digests.cue"
+[ -n "${ZOT:-}" ] || die "phase 4: images.zot not pinned in digests.cue"
 
 kubectl apply -f manifests/zot/configmap.yaml -f manifests/zot/pvc.yaml -f manifests/zot/service.yaml >/dev/null
 sed "s|\${ZOT}|${ZOT}|g" manifests/zot/deployment.yaml | kubectl apply -f - >/dev/null
 log_kv step=zot waiting=available
 kubectl -n cv-pipeline rollout status deploy/zot --timeout=120s >/dev/null
 
-kubectl -n cv-pipeline apply -f tasks/buildpacks.yaml -f pipeline/pipeline-cnb.yaml >/dev/null
-log_kv step=cnb-pipeline state=applied
+kubectl -n cv-pipeline apply -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
+log_kv step=pipeline state=applied
 
 cat >&2 <<'NOTE'
 
-  CNB pull path needs two one-time OrbStack node steps (docs/runbook.md):
+  The CNB pull path needs two one-time OrbStack node steps (docs/runbook.md):
     orb config set k8s.expose_services true      # then: orb stop / restart
     #  ~/.orbstack/config/docker.json:
     #  {"insecure-registries":["zot.cv-pipeline.svc.cluster.local:5000"]}

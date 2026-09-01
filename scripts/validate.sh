@@ -36,11 +36,11 @@ if [ "$#" -gt 0 ]; then
 	files=("$@")
 else
 	# Our own tracked manifests only. Excludes: vendored schemas + upstream
-	# manifests, negative-test fixtures, apko config, and generated
+	# manifests, negative-test fixtures and generated
 	# non-manifest YAML.
 	mapfile -t files < <(
 		git ls-files -- '*.yaml' '*.yml' \
-		| grep -Ev '^(schemas/|vendor/|scripts/test/fixtures/|bootstrap/pipeline-utils/|params\.yaml$)' || true
+		| grep -Ev '^(schemas/|vendor/|scripts/test/fixtures/|params\.yaml$)' || true
 	)
 fi
 

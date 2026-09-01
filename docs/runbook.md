@@ -34,73 +34,59 @@ One entry per failure mode, added by the slice that introduces it. Format:
 - **Fix:** address the finding. `git commit --no-verify` only for a genuine
   emergency, and fix it in the next commit.
 
-### OrbStack image-pull facts (why Slice 1 has no registry)
+### OrbStack registry trust — the two per-platform node steps
 
-Verified 2026-08-30 on OrbStack k8s `v1.35.6+orb1` (runtime `docker://29.4.0`):
-
-- Image pulls go through the **OrbStack Docker daemon** (cri-dockerd).
-- That daemon **cannot resolve `*.svc.cluster.local`** — it uses OrbStack DNS
-  (`0.250.250.200`) and times out. A ClusterIP `.svc` registry name is unusable
-  for kubelet pulls.
-- It requires **HTTPS** unless the registry is in `insecure-registries`
-  (`~/.orbstack/config/docker.json`, edited via `orb config docker` — restarts
-  the docker engine, not the whole VM).
-- **NodePort is not routed to the host** (`k8s.expose_services: false`);
-  enabling it needs a full `orb stop` / restart.
-- **OrbStack k8s reads the host Docker image store** — an image `docker load`ed
-  locally runs with `imagePullPolicy: Never`, no registry.
-- In-cluster pods reach ClusterIPs and `.svc` names fine.
-
-Slice 1 therefore uses `crane` → tarball → `docker load` → run by digest. zot and
-a real pull-trust path arrive at Slice 3.
-
-### CNB pivot — the zot pull path (supersedes some of the above)
-
-Verified 2026-09-01 while wiring `pipeline/pipeline-cnb.yaml`. The 2026-08-30
-"daemon cannot resolve `*.svc`" finding was taken with `k8s.expose_services:
-false`. Turning it on changes the picture:
+Verified 2026-09-01 on OrbStack k8s `v1.35.6+orb1`. The `cv` Deployment pulls
+its image from the in-cluster zot **by digest**; that needs two one-time host
+changes:
 
 ```
-orb config set k8s.expose_services true      # then: orb stop / restart
-# ~/.orbstack/config/docker.json:
+orb config set k8s.expose_services true      # then a full: orb stop / restart
+# edit ~/.orbstack/config/docker.json:
 {"insecure-registries":["zot.cv-pipeline.svc.cluster.local:5000"]}
-orb restart docker                            # ~30s, restarts the k8s cluster
+orb restart docker                            # ~30s, restarts the k8s cluster too
 ```
 
-With those two settings the OrbStack Docker daemon (the kubelet's puller) DOES
-resolve and pull plain-HTTP from `zot.cv-pipeline.svc.cluster.local:5000`.
-Because OrbStack routes that name to both the in-cluster network and the Mac
-daemon, **one address serves push and pull** — no two-address split, no
-hostPort. (hostPort on `127.0.0.1` does not work on OrbStack anyway: the VM
-loopback is forwarded to the Mac loopback, and `:5000` there is macOS AirPlay
-Receiver — `Server: AirTunes`.)
+With both, the OrbStack Docker daemon (the kubelet's puller) resolves and pulls
+plain-HTTP from `zot.cv-pipeline.svc.cluster.local:5000`. OrbStack routes that
+name to **both** the in-cluster network and the Mac daemon, so **one address
+serves push and pull** — no two-address split, no hostPort.
 
-`k8s.expose_services` + the `insecure-registries` entry are the documented
-per-platform node steps. A portable cluster substitutes its own registry
-ingress + trust config.
+Gotchas found while wiring this:
 
-## Slice 1
+- A Pod `hostPort` on `127.0.0.1` does NOT work on OrbStack — the VM loopback is
+  forwarded to the Mac loopback. And `127.0.0.1:5000` on the Mac is macOS
+  AirPlay Receiver (`Server: AirTunes`, returns 403).
+- Without `k8s.expose_services: true` the daemon can't resolve `*.svc` (it uses
+  OrbStack DNS `0.250.250.200`).
+- These steps are per-platform node config. A portable cluster substitutes its
+  own registry ingress + trust config. `bootstrap.sh` phase 4 prints the two
+  commands but does not run them (host config).
+
+## The pipeline
 
 ### `scripts/test/e2e.sh` or `negative.sh` fails
 
-- **Check:** `e2e.sh --keep` leaves the `cv-e2e-<uid>` namespace + the run
-  evidence in `scripts/test/_artifacts/<ns>/` (pipelinerun.yaml, taskruns.yaml,
-  events.txt, pipeline.log, pods.txt, deployed.yaml). Read `pipeline.log` first.
-- **Common causes:** cluster DNS blip in a Task pod (`resolve` retries the
-  clone 3x — if it still fails, `kubectl -n kube-system rollout restart deploy
-  coredns`); the `cv/pipeline-utils:slice1-arm64` image is stale
-  (`bootstrap/build-pipeline-utils.sh` to rebuild + `--check` for the digest);
-  Service-endpoint lag (smoke retries `/healthz` 10x — a persistent failure
-  means the image genuinely doesn't serve).
-- **Cleanup after `--keep`:** `kubectl delete ns cv-e2e-<uid>`;
-  `docker rmi cv:git-<sha>`; `rm -rf scripts/test/_artifacts`.
+- **Check:** `e2e.sh --keep` leaves the `cv-cnb-e2e-<uid>` namespace, the
+  run-scoped zot repo, and the evidence in `scripts/test/_artifacts/<ns>/`
+  (pipelinerun.yaml, taskruns.yaml, events.txt, pipeline.log, deployed.yaml).
+  Read `pipeline.log` first.
+- **Common causes:** the OrbStack node-trust steps above are not done (the `cv`
+  pod `ErrImagePull`s or gets `http: server gave HTTP response to HTTPS
+  client`); cluster DNS blip in a Task pod (`fetch` clones shallow — retry the
+  run); Service-endpoint lag (smoke/deploy retry `/healthz` 10x — a persistent
+  failure means the image genuinely doesn't serve); zot PVC full.
+- **Cleanup after `--keep`:** `kubectl delete ns cv-cnb-e2e-<uid>`;
+  `kubectl -n cv-pipeline exec deploy/zot -- rm -rf /var/lib/registry/cv-e2e-<uid>`;
+  `rm -rf scripts/test/_artifacts`.
 
 ### A PipelineRun is stuck / a stale `cv` Deployment is running
 
 - **Rollback:** `kubectl -n cv-pipeline rollout undo deploy/cv`, or
   `kubectl -n cv-pipeline set image deploy/cv app=$(kubectl -n cv-pipeline get
-  cm cv-deploy-state -o jsonpath='{.data.previous}')`. Find the last-good tag in
-  the `cv-deploy-state` ConfigMap or `kubectl rollout history deploy/cv`.
+  cm cv-deploy-state -o jsonpath='{.data.previous}')`. `cv-deploy-state.data`
+  records `current_image`, `current_digest`, and `previous` (a `<zot>@sha256`
+  ref); `kubectl rollout history deploy/cv` is the fuller trail.
 
 ### `cue vet digests.cue` fails with a constraint error
 
@@ -108,4 +94,19 @@ ingress + trust config.
   in, or a truncated digest).
 - **Check:** the error names the field.
 - **Fix:** put the full `sha256:...` digest in. Get it with
-  `crane digest <ref>` (Slice 1+) or from the source registry's UI.
+  `crane digest <ref>` (add `--platform linux/arm64` for a multi-arch image —
+  the builder + run image are pinned by their arm64 CHILD digest).
+
+### `cv` pod: `container has runAsNonRoot and image has non-numeric user`
+
+- **Cause:** the Heroku/CNB launch user is the name `heroku`, not a uid. A pod
+  with `runAsNonRoot: true` and no `runAsUser` can't verify it.
+- **Fix:** the pipeline's smoke/deploy specs set `runAsUser: 1000` explicitly
+  (`CNB_USER_ID` for the Heroku and Paketo stacks). Any hand-rolled Deployment
+  of a CNB image needs the same.
+
+### CNB build: two runs of one SHA give different image digests
+
+- **Not a bug** — the lifecycle is not byte-reproducible without
+  `SOURCE_DATE_EPOCH` + layer normalisation (Slice 2, `docs/debt.md`). Assert
+  equal SBOM package set + app-layer content hash, never raw digest.

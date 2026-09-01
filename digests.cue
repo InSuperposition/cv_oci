@@ -5,8 +5,7 @@
 //
 // A value of "" means "not yet pinned". gen-digests.sh skips empty entries;
 // any script or Task that needs an unpinned digest must fail loudly (Rule 13).
-// Digests are filled in as each slice lands its component — see
-// docs/bootstrap-toolchain.md for the two-phase pipelineUtils flow.
+// Digests are filled in as each slice lands its component.
 package digests
 
 #Digest:  =~"^sha256:[0-9a-f]{64}$"
@@ -24,23 +23,8 @@ frontend: fixtureSha: "cb333ee18646e1d97eab592547fe09cbef83727b"
 images: [string]: #Pin
 
 images: {
-	// Slice 1
-	// gcr.io/distroless/nodejs24-debian12:nonroot — the runtime base.
-	// This is the linux/arm64 CHILD digest (not the multi-arch index); Slice 1
-	// is arm64-only. Slice 5 makes the base arch-aware.
-	distrolessNode: "sha256:0d757b971ffc552eeb69e4f13b9223b36d79fb28ccb5425f33bf044dd7760b25"
-	// built out-of-cluster by bootstrap/build-pipeline-utils.sh (two-phase, see
-	// docs/bootstrap-toolchain.md). Rebuild + repin when apko.yaml or scripts/ change.
-	pipelineUtils: "sha256:2868a1ddbd8efe39c1fb58f9b2fb022cc09c0187c11fef2cca0481538a03cc09"
+	// --- the CNB pipeline (docs/designs/buildpacks-pivot.md) ---
 
-	// docker.io/library/node:24-bookworm-slim — the build Task image. MUST be
-	// debian/glibc + arm64 to match the distroless runtime base: the app's
-	// native deps (oxc-transform, esbuild, lightningcss) ship per-libc bindings
-	// (linux-arm64-gnu), so `npm ci` runs here, not in the musl pipeline-utils.
-	// crane/apko path only — deleted at Commit 1b.
-	nodeBuild: "sha256:e9b5516b06baeaea9a8e65a7aec6a85fbb960a30b52b66968f2c8092b3e2a3eb"
-
-	// --- CNB pivot (Commit 1a) ---
 	// docker.io/heroku/builder:24 — the CNB builder. arm64 CHILD digest (native
 	// build on the arm64 node). Every paketobuildpacks builder is amd64-only
 	// (probed 2026-09-01); Heroku's is genuinely multi-arch. See docs/gate-zero.md.
@@ -50,13 +34,13 @@ images: {
 	// docker.io/library/bash:5.1.4 — the vendored buildpacks task's prepare/results
 	// step image (multi-arch; upstream tektoncd/catalog pins this tag).
 	cnbUtilityImage: "sha256:b208215a4655538be652b2769d82e576bc4d0a2bb132144c060efc5be8c3f5d6"
-	// docker.io/alpine/k8s:1.31.1 — smoke/deploy runner (kubectl + curl + bash).
-	// arm64 child digest. Replaces pipeline-utils for the CNB pipeline.
+	// docker.io/alpine/k8s:1.31.1 — the smoke/deploy step runner (kubectl + curl
+	// + bash). arm64 child digest.
 	cnbKubectlImage: "sha256:4a54840ba92ee07478bfdb5daf09d1e8ef16657dda92cfe8677c6baf557a7ea0"
-	// docker.io/alpine/git:latest — the CNB fetch step. arm64 child digest.
+	// docker.io/alpine/git:latest — the fetch step. arm64 child digest.
 	cnbGitImage: "sha256:922e413cfcd642ee87eda2da02462d86544ce3d2d0a0e43da1f3b83aabcb5730"
 	// ghcr.io/project-zot/zot-minimal-linux-arm64:v2.1.5 — the in-cluster
-	// registry (Commit 1a zot seed). arm64-native image.
+	// registry seed. arm64-native image.
 	zot: "sha256:55eafc5a16b0efb965786ccf75cd5fb7f76e3832a8bcd7f0da3983e689039a69"
 
 	// Slice 3

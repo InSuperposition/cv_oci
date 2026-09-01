@@ -16,6 +16,5 @@
 # generated at apply time only if ever run outside the committed flow
 *.tmp
 
-# apko / crane build artifacts
+# build artifacts
 *.tar
-bootstrap/pipeline-utils/pu.tar

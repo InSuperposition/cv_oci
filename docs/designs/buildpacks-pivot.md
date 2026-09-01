@@ -382,7 +382,7 @@ build). zot pull path is one address, not two (OrbStack `k8s.expose_services`
    pull-policy env, `scripts/test/{e2e-cnb,negative-cnb}.sh`, `bootstrap.sh`
    phase 5, `debt.md` + `runbook.md`. Commits `f77c9db` (+tests/bootstrap
    follow-up). No `dockerconfig` Secret — zot is unauth in the seed.
-4. **Commit 1b — delete the crane/apko pipeline.** `tasks/{assemble,build,resolve}.yaml`,
+4. **DONE — Commit 1b — delete the crane/apko pipeline.** `tasks/{assemble,build,resolve}.yaml`,
    `pipeline/pipeline.yaml`, `scripts/assemble-image.sh`, `scripts/resolve-sha.sh`
    + its bats, `bootstrap/build-pipeline-utils.sh`, `bootstrap/pipeline-utils/`,
    `scripts/check-toolchain.sh`, `bootstrap.sh` phase 4, the `params.yaml` /

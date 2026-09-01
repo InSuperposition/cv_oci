@@ -50,6 +50,8 @@ RUN_IMAGE="docker.io/heroku/heroku:24@${CNBRUNIMAGE}"
 UTILITY="docker.io/library/bash@${CNBUTILITYIMAGE}"
 KUBECTL_IMG="docker.io/alpine/k8s:1.31.1@${CNBKUBECTLIMAGE}"
 GIT_IMG="docker.io/alpine/git@${CNBGITIMAGE}"
+TRIVY_IMG="ghcr.io/aquasecurity/trivy@${TRIVYCLI}"
+TRIVY_DB="${TRIVYDB}"
 
 UID_SUFFIX="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 NS1="cv-repro-${UID_SUFFIX}-1"
@@ -110,6 +112,8 @@ spec:
     - { name: utility-image, value: "$UTILITY" }
     - { name: kubectl-image, value: "$KUBECTL_IMG" }
     - { name: git-image, value: "$GIT_IMG" }
+    - { name: trivy-image, value: "$TRIVY_IMG" }
+    - { name: trivy-db, value: "$TRIVY_DB" }
     - { name: frontend-repo, value: "$FRONTEND_REPO" }
     - { name: frontend-ref, value: "$FIXTURE_SHA" }
     - { name: app-repo, value: "$3" }

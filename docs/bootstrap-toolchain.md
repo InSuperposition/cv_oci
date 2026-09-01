@@ -16,6 +16,7 @@ tests need. Pin these; a version bump is a reviewed commit (Rule 12).
 | `bats` | 1.14.0 | `scripts/test/*.bats` | `brew install bats-core` |
 | `jq` | 1.8.2 | JSONL task artifacts, scripting | `brew install jq` |
 | `git` | 2.55.0 | everything | system |
+| `trivy` | 0.67.2 | `scripts/test/negative.sh` CVE-gate scenario (`trivy sbom` against the frozen fixture). The pipeline `scan` step runs the pinned `trivy` **image** (`digests.cue` `trivyCli`), not this host binary. | `brew install trivy` / [releases](https://github.com/aquasecurity/trivy/releases) |
 | `cosign` | (pin at first use) | `cosign verify` / `verify-attestation` (Slice 4) | `brew install cosign` |
 
 ## In-cluster CRD schemas for `scripts/validate.sh`

@@ -6,15 +6,18 @@
 #                                     GET /healthz, `deploy` is skipped, the
 #                                     `finally` smoke-teardown still runs, and
 #                                     nothing is deployed to `cv` (no leak)
+# Scenario 3  CVE gate             -> the exact scan-step policy, run against a
+#                                     frozen fixture SBOM with a known fixable
+#                                     CRITICAL, exits non-zero (the gate blocks)
 #
-# Needs: kubectl, tkn, jq. Run after bootstrap.sh (zot up, node-trust done).
+# Needs: kubectl, tkn, crane, trivy. Run after bootstrap.sh (zot up, node-trust done).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck source=scripts/lib/log.sh
 source "$ROOT/scripts/lib/log.sh"
 cd "$ROOT"
-need kubectl; need tkn; need crane
+need kubectl; need tkn; need crane; need trivy
 
 # shellcheck disable=SC1091
 source digests.env
@@ -24,6 +27,8 @@ RUN_IMAGE="docker.io/heroku/heroku:24@${CNBRUNIMAGE}"
 UTILITY="docker.io/library/bash@${CNBUTILITYIMAGE}"
 KUBECTL_IMG="docker.io/alpine/k8s:1.31.1@${CNBKUBECTLIMAGE}"
 GIT_IMG="docker.io/alpine/git@${CNBGITIMAGE}"
+TRIVY_IMG="ghcr.io/aquasecurity/trivy@${TRIVYCLI}"
+TRIVY_DB="${TRIVYDB}"
 PRE_HEALTHZ_SHA="0bbc68418ce92048a85b8b18afe1dcfe6204bb83"   # cv_frontend "Initial commit"
 
 FAILURES=0
@@ -78,6 +83,8 @@ spec:
     - { name: utility-image, value: "$UTILITY" }
     - { name: kubectl-image, value: "$KUBECTL_IMG" }
     - { name: git-image, value: "$GIT_IMG" }
+    - { name: trivy-image, value: "$TRIVY_IMG" }
+    - { name: trivy-db, value: "$TRIVY_DB" }
     - { name: frontend-repo, value: "$FRONTEND_REPO" }
     - { name: frontend-ref, value: "$1" }
     - { name: app-repo, value: "${ZOT_ADDR}/cv-neg-${UID_SUFFIX}" }
@@ -127,6 +134,23 @@ check "pre-healthz: deploy was skipped"        empty "$(task_status "$p2" deploy
 check "pre-healthz: smoke-teardown ran"        test "$(task_status "$p2" smoke-teardown)" = "Succeeded"
 check "pre-healthz: no smoke resources leaked" test "$(kubectl -n "$NS" get deploy,svc -l cv-oci/smoke -o name 2>/dev/null | wc -l | tr -d ' ')" = "0"
 check "pre-healthz: nothing deployed to cv"    empty "$(kubectl -n "$NS" get deploy cv -o name 2>/dev/null || true)"
+
+# ---- scenario 3: CVE gate blocks a fixable CRITICAL --------------------
+# The scan step's policy string, kept in sync here (grep guard below). Running
+# it against a frozen fixture SBOM (lodash@4.17.4, CVE-2019-10744 CRITICAL,
+# fixed in 4.17.12) with the digest-pinned DB is a permanently reproducible
+# FAIL — no vuln image to pull, no drift.
+log_kv step=negative scenario=cve-gate
+POLICY="--severity CRITICAL --ignore-unfixed --exit-code 1"
+check "scan-step policy string matches pipeline.yaml" \
+	grep -qF -- "POLICY=\"$POLICY\"" pipeline/pipeline.yaml
+set +e
+# shellcheck disable=SC2086
+trivy sbom scripts/test/fixtures/vuln-sbom.cdx.json --quiet \
+	--db-repository "ghcr.io/aquasecurity/trivy-db@${TRIVY_DB}" $POLICY >/dev/null 2>&1
+cve_rc=$?
+set -e
+check "CVE gate exits non-zero on the fixable-CRITICAL fixture" test "$cve_rc" -ne 0
 
 echo
 if [ "$FAILURES" -eq 0 ]; then

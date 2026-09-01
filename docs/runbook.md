@@ -114,6 +114,42 @@ Gotchas found while wiring this:
 
 ### CNB build: two runs of one SHA give different image digests
 
-- **Not a bug** — the lifecycle is not byte-reproducible without
-  `SOURCE_DATE_EPOCH` + layer normalisation (Slice 2, `docs/debt.md`). Assert
-  equal SBOM package set + app-layer content hash, never raw digest.
+- Since Slice 2 the build **is** byte-reproducible — two runs of one fixture
+  SHA produce the identical outer image digest (`scripts/test/repro.sh`
+  asserts it). If they diverge, the usual cause is the `fetch` step leaving
+  `.git/` in the tree (its `rm -rf .git` regressed): `.git/index` and
+  `.git/logs/HEAD` carry wall-clock data the buildpack copies into the app
+  layer. `repro.sh` also checks the per-CNB-layer content hashes from the
+  `io.buildpacks.lifecycle.metadata` label, which localise the drift.
+
+### Inspecting the CVE verdict + SBOM of a build (Slice 3)
+
+The `scan` task records its work on the shared workspace (ephemeral) and as
+PipelineRun results:
+
+```
+kubectl -n <ns> get pipelinerun <prn> -o jsonpath='{.status.results}' | jq
+#   cve-verdict     pass | fail-critical
+#   cve-db-digest   the ghcr.io/aquasecurity/trivy-db digest the verdict is against
+#   sbom-components CycloneDX component count
+```
+
+To re-derive them from an image already in zot (host `trivy` + `crane`):
+
+```
+REF=zot.cv-pipeline.svc.cluster.local:5000/cv@sha256:<digest>
+crane pull --insecure "$REF" /tmp/img.tar
+trivy image --input /tmp/img.tar --severity CRITICAL --ignore-unfixed \
+  --db-repository ghcr.io/aquasecurity/trivy-db@<pinned> --exit-code 1   # CVE gate
+trivy image --input /tmp/img.tar --format cyclonedx | jq '.components | length'  # SBOM
+```
+
+The verdict is reproducible: the same `(image digest, DB digest)` pair always
+gives the same answer, independent of when you run it.
+
+### heroku/builder:24 emits no SBOM of its own
+
+- The `create` step's launch SBOM layer is a 5-byte `null` (`bom_len: 0`,
+  `sbom: none` in `io.buildpacks.build.metadata`). The `scan` step authors a
+  CycloneDX SBOM with `trivy image --format cyclonedx` instead — scan-time
+  provenance, not build-time. `docs/debt.md` carries the caveat.

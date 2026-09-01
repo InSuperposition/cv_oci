@@ -35,6 +35,8 @@ RUN_IMAGE="docker.io/heroku/heroku:24@${CNBRUNIMAGE}"
 UTILITY="docker.io/library/bash@${CNBUTILITYIMAGE}"
 KUBECTL_IMG="docker.io/alpine/k8s:1.31.1@${CNBKUBECTLIMAGE}"
 GIT_IMG="docker.io/alpine/git@${CNBGITIMAGE}"
+TRIVY_IMG="ghcr.io/aquasecurity/trivy@${TRIVYCLI}"
+TRIVY_DB="${TRIVYDB}"
 
 UID_SUFFIX="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 NS="cv-e2e-${UID_SUFFIX}"
@@ -103,6 +105,8 @@ spec:
     - { name: utility-image, value: "$UTILITY" }
     - { name: kubectl-image, value: "$KUBECTL_IMG" }
     - { name: git-image, value: "$GIT_IMG" }
+    - { name: trivy-image, value: "$TRIVY_IMG" }
+    - { name: trivy-db, value: "$TRIVY_DB" }
     - { name: frontend-repo, value: "$FRONTEND_REPO_URL" }
     - { name: frontend-ref, value: "$FIXTURE_SHA" }
     - { name: app-repo, value: "$APP_REPO" }
@@ -148,6 +152,16 @@ case "$pod_imageid" in *"$digest"*) pod_matches=yes ;; *) pod_matches=no ;; esac
 check "running Pod imageID carries the built digest" test "$pod_matches" = yes
 
 check "the image is really in zot" crane digest --insecure "$want_ref"
+
+# Slice 3 — CVE gate + SBOM. The scan task hard-gates smoke/deploy, so reaching
+# here already means it passed; assert the recorded verdict + SBOM shape.
+prr() { kubectl -n "$NS" get pipelinerun "$PRN" -o jsonpath="{.status.results[?(@.name==\"$1\")].value}" 2>/dev/null || true; }
+cve_verdict="$(prr cve-verdict)"
+cve_db="$(prr cve-db-digest)"
+sbom_components="$(prr sbom-components)"
+check "CVE verdict is pass" test "$cve_verdict" = "pass"
+check "CVE verdict is against the pinned trivy-db digest" test "$cve_db" = "$TRIVY_DB"
+check "CycloneDX SBOM has a real component count (>=20)" bash -c "[ '${sbom_components:-0}' -ge 20 ]"
 
 # The probe pod needs its own restricted securityContext — $NS enforces PSA
 # `restricted` (Slice 1.7). Strategic-merge it onto the generated e2e-probe container.

@@ -24,6 +24,10 @@ spec:
     - { name: utility-image, type: string }
     - { name: kubectl-image, type: string }
     - { name: git-image, type: string }
+    - { name: trivy-image, type: string }
+    # trivy-db: bare sha256 digest of ghcr.io/aquasecurity/trivy-db:2 (Slice 3).
+    # Pinned so the CVE verdict is reproducible.
+    - { name: trivy-db, type: string }
     - { name: frontend-repo, type: string }
     - { name: frontend-ref, type: string }
     - { name: app-repo, type: string, default: "zot.cv-pipeline.svc.cluster.local:5000/cv" }
@@ -35,6 +39,11 @@ spec:
   results:
     - { name: app-image-digest, value: "$(tasks.build.results.APP_IMAGE_DIGEST)" }
     - { name: app-image-url, value: "$(tasks.build.results.APP_IMAGE_URL)" }
+    # Slice 3: "pass" iff the scan task ran and found no fixable CRITICAL in the
+    # app image or the run image, scanned against the pinned vuln-DB.
+    - { name: cve-verdict, value: "$(tasks.scan.results.VERDICT)" }
+    - { name: cve-db-digest, value: "$(tasks.scan.results.DB_DIGEST)" }
+    - { name: sbom-components, value: "$(tasks.scan.results.SBOM_COMPONENTS)" }
   tasks:
     - name: fetch
       workspaces: [{ name: source, workspace: shared }]
@@ -105,8 +114,113 @@ spec:
         - { name: CNB_INSECURE_REGISTRIES, value: "$(params.insecure-registries)" }
         - { name: CNB_PLATFORM_API, value: "0.9" }
 
-    - name: smoke
+    # Slice 3 — CVE gate + CycloneDX SBOM. Trivy scans the built app image and
+    # the run image against a digest-pinned vuln-DB, and authors a CycloneDX
+    # SBOM from the app image (heroku/builder:24 emits none of its own).
+    # `smoke`/`deploy` run only if the gate passes AND the SBOM is well-formed.
+    # Policy: fail on a currently-fixable CRITICAL (no baseline ledger). The
+    # verdict is reproducible — (app digest, DB digest) determines it.
+    - name: scan
       runAfter: [build]
+      workspaces: [{ name: source, workspace: shared }]
+      params:
+        - { name: app-ref, value: "$(params.app-repo)@$(tasks.build.results.APP_IMAGE_DIGEST)" }
+        - { name: app-digest, value: "$(tasks.build.results.APP_IMAGE_DIGEST)" }
+        - { name: run-image, value: "$(params.run-image)" }
+        - { name: trivy-image, value: "$(params.trivy-image)" }
+        - { name: trivy-db, value: "$(params.trivy-db)" }
+      taskSpec:
+        params: [{ name: app-ref }, { name: app-digest }, { name: run-image }, { name: trivy-image }, { name: trivy-db }]
+        workspaces: [{ name: source }]
+        results:
+          - { name: VERDICT, description: "pass | fail-critical" }
+          - { name: DB_DIGEST, description: "the pinned trivy-db digest the verdict is against" }
+          - { name: SBOM_COMPONENTS, description: "component count in the CycloneDX SBOM" }
+        steps:
+          - name: scan
+            image: $(params.trivy-image)
+            securityContext: *restricted-sc  # Slice 1.7
+            script: |
+              #!/bin/sh
+              set -eu
+              WS="$(workspaces.source.path)"
+              CACHE="$WS/.trivycache"
+              DB_REF="ghcr.io/aquasecurity/trivy-db@$(params.trivy-db)"
+              # CVE policy — keep in sync with scripts/test/negative.sh (grep guard).
+              POLICY="--severity CRITICAL --ignore-unfixed --exit-code 1"
+              export TRIVY_CACHE_DIR="$CACHE"
+              mkdir -p "$CACHE"
+
+              # Pinned DB, fetched once. Every scan below is --skip-db-update, so
+              # the verdict depends only on (image digest, DB digest).
+              trivy image --quiet --download-db-only --db-repository "$DB_REF"
+
+              # Scan a ref for fixable CRITICALs; write the full JSON report;
+              # return trivy's exit code (1 = found) without aborting the step.
+              scan_ref() {
+                _ref="$1"; _out="$2"; _insecure="${3:-}"
+                set +e
+                trivy image --quiet --skip-db-update $POLICY \
+                  --format json --output "$_out" $_insecure "$_ref"
+                _rc=$?
+                set -e
+                return $_rc
+              }
+
+              app_rc=0; run_rc=0
+              scan_ref "$(params.app-ref)"  "$WS/scan-app.json" --insecure || app_rc=$?
+              scan_ref "$(params.run-image)" "$WS/scan-run.json"             || run_rc=$?
+              cve_verdict=pass
+              [ "$app_rc" -eq 0 ] && [ "$run_rc" -eq 0 ] || cve_verdict=fail-critical
+
+              # CycloneDX SBOM of the app image, authored by the scanner.
+              SBOM="$WS/sbom.cdx.json"
+              trivy image --quiet --skip-db-update --format cyclonedx \
+                --output "$SBOM" --insecure "$(params.app-ref)"
+
+              # Well-formed? names the Node runtime? names every production npm
+              # dependency the checked-out app declares?
+              sbom_check=ok
+              grep -q '"bomFormat": *"CycloneDX"' "$SBOM" || sbom_check="fail:not-cyclonedx"
+              grep -q '"name": *"node"'            "$SBOM" || sbom_check="fail:no-node"
+              comp_count=$(grep -c '"bom-ref":' "$SBOM" || true)
+              deps=$(sed -n '/"dependencies"[[:space:]]*:[[:space:]]*{/,/}/p' "$WS/app/package.json" \
+                     | grep -oE '"[A-Za-z0-9@/_.-]+"[[:space:]]*:' \
+                     | sed 's/[":[:space:]]//g' | grep -v '^dependencies$' || true)
+              for d in $deps; do
+                grep -q "\"name\": *\"${d##*/}\"" "$SBOM" || sbom_check="fail:missing-dep:$d"
+              done
+
+              cat > "$WS/cve-verdict.json" <<JSON
+              {
+                "schema": "cv-oci/cve-verdict/v1",
+                "app_ref": "$(params.app-ref)",
+                "app_digest": "$(params.app-digest)",
+                "run_image": "$(params.run-image)",
+                "db": "$DB_REF",
+                "policy": "fixable-CRITICAL",
+                "cve_verdict": "$cve_verdict",
+                "sbom_check": "$sbom_check",
+                "sbom_components": $comp_count,
+                "app_report": "scan-app.json",
+                "run_report": "scan-run.json",
+                "sbom": "sbom.cdx.json"
+              }
+              JSON
+              cat "$WS/cve-verdict.json"
+
+              printf '%s' "$cve_verdict"        > "$(results.VERDICT.path)"
+              printf '%s' "$(params.trivy-db)"  > "$(results.DB_DIGEST.path)"
+              printf '%s' "$comp_count"         > "$(results.SBOM_COMPONENTS.path)"
+
+              fail=0
+              [ "$cve_verdict" = pass ] || { echo "CVE gate: fixable CRITICAL (app_rc=$app_rc run_rc=$run_rc)" >&2; fail=1; }
+              [ "$sbom_check" = ok ]    || { echo "SBOM check: $sbom_check" >&2; fail=1; }
+              [ "$comp_count" -ge 20 ]  || { echo "SBOM check: only $comp_count components" >&2; fail=1; }
+              exit $fail
+
+    - name: smoke
+      runAfter: [scan]
       params:
         - { name: image-ref, value: "$(params.app-repo)@$(tasks.build.results.APP_IMAGE_DIGEST)" }
         - { name: namespace, value: "$(params.namespace)" }

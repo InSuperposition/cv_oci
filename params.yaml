@@ -16,6 +16,12 @@ params:
   - name: cnbUtilityImage-digest
     type: string
     default: "sha256:b208215a4655538be652b2769d82e576bc4d0a2bb132144c060efc5be8c3f5d6"
+  - name: trivyCli-digest
+    type: string
+    default: "sha256:1c60229e5bc7f5830bf8aeb829442cb01f71ce3cd5b4d1b754f1f166c9945951"
+  - name: trivyDb-digest
+    type: string
+    default: "sha256:35f26e97af328ec930bf41d86c6a34ca68c11d32ccd10d3de2b7ad856ed6e084"
   - name: zot-digest
     type: string
     default: "sha256:55eafc5a16b0efb965786ccf75cd5fb7f76e3832a8bcd7f0da3983e689039a69"

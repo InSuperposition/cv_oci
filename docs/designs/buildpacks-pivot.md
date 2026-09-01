@@ -410,14 +410,30 @@ run if it passes.
   fixable CRITICALs" becomes a claim anyone can re-run to the exact same answer.
   The DB pin is per-run provenance, orthogonal to Slice 2 build determinism.
 
-**SBOM-presence test.** No new tooling — `crane` (host tool) reads
-`io.buildpacks.lifecycle.metadata.sbom.sha`, pulls that layer, asserts it parses
-as valid CycloneDX + SPDX and names the production npm deps + the Node runtime.
-Document the extraction path in `docs/runbook.md`.
+**SBOM.** Original plan: read the buildpack-authored SBOM off the image. Reality:
+`heroku/builder:24` **emits none** — its launch SBOM layer is a 5-byte `null`,
+`io.buildpacks.build.metadata` has `bom_len: 0`. So the `scan` step authors a
+CycloneDX SBOM itself (`trivy image --format cyclonedx`) and asserts it is
+well-formed, names the Node runtime, and names every production npm dep the
+checked-out `app/package.json` declares. Scanner-authored, not build-authored —
+`debt.md` carries the provenance caveat (upgrade: a Paketo builder or a
+lockfile-keyed cyclonedx-npm step). Extraction path in `docs/runbook.md`.
 
-**Acceptance:** a new `negative.sh` case (known-fixable-CVE fixture fails readably;
-clean image passes); an `e2e.sh` assertion that the SBOM layer is present +
-well-formed + the CVE-verdict record is written; `validate.sh` green; bisect-safe.
+**Acceptance:** a new `negative.sh` case (the exact scan-step policy against a
+frozen fixture SBOM — `lodash@4.17.4` / CVE-2019-10744, both fixture and DB
+pinned so the FAIL is permanent — exits non-zero); `e2e.sh` asserts
+`cve-verdict == pass`, the verdict is against the pinned DB digest, and the
+SBOM has a real component count; `validate.sh` green; bisect-safe.
+
+**Status: DONE (2026-09-02).** `scan` task added (`fetch → build → scan →
+smoke → deploy`). `trivy` 0.74.0 image pinned as `trivyCli`;
+`ghcr.io/aquasecurity/trivy-db:2` pinned as `trivyDb`. `--db-repository
+<repo>@<digest>` + `--skip-db-update` makes the verdict a pure function of
+(image digest, DB digest) — probed. Verdict record `cve-verdict.json` on the
+workspace + PipelineRun results `cve-verdict` / `cve-db-digest` /
+`sbom-components`. Verified green under PSA `restricted`: `e2e.sh` (14/14, incl.
+the 3 new assertions), `negative.sh` (12/12, incl. the CVE-gate case),
+`repro.sh` (still byte-reproducible — the scan step does not touch the image).
 
 #### Slice 4 — Chains: sign + reproducible provenance + referrers
 
@@ -926,10 +942,14 @@ is one address (OrbStack service DNS + daemon `insecure-registries`).**
      `restricted`.
    - **DONE — T4 prereq.** `cnb-pivot` pushed to `origin` — the git resolver
      can reach `pipeline.yaml` for Slice 4's `refSource`.
-   - **next: Slice 3** (reproducible CVE verdict + SBOM-presence test) →
-     **Slice 4** (Chains: sign + reproducible provenance + referrers; probes
-     P8/P9/P10) → **Slice 5** (GitOps via `cv_gitops`; probe P5) → **Slice 6**
-     (`reconstruct.sh` capstone).
+   - **DONE — Slice 3 CVE gate + CycloneDX SBOM.** `ce65159` + repin. `scan`
+     task between `build` and `smoke`; digest-pinned trivy image + vuln-DB →
+     reproducible verdict; trivy-authored CycloneDX SBOM (heroku emits none).
+     `e2e`/`negative`/`repro` green under `restricted`.
+   - **next: Slice 4** (Chains: sign + reproducible provenance + referrers;
+     probes P8/P9/P10). The T1 report.toml parse fix it depended on is already
+     in (`a191de8`). → **Slice 5** (GitOps via `cv_gitops`; probe P5) →
+     **Slice 6** (`reconstruct.sh` capstone).
 6. **`packs` project** — separate, later, its own design doc.
 7. **`cv_gitops` project** — new repo, created when Slice 5 starts, its own
    design doc (like `cv_packs`).

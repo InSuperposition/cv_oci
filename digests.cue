@@ -44,13 +44,13 @@ images: {
 	zot: "sha256:55eafc5a16b0efb965786ccf75cd5fb7f76e3832a8bcd7f0da3983e689039a69"
 
 	// Slice 3 — Trivy CVE gate.
-	// trivyCli: ghcr.io/aquasecurity/trivy:0.67.2, arm64 child (the scan step
+	// trivyCli: ghcr.io/aquasecurity/trivy:0.74.0, arm64 child (the scan step
 	// runs on the arm64 node). trivyDb: ghcr.io/aquasecurity/trivy-db:2,
 	// pinned by digest so the CVE verdict is reproducible — (app digest, DB
 	// digest) determines the verdict. The scan step passes
 	// `--db-repository ghcr.io/aquasecurity/trivy-db@<trivyDb>` and the tests
 	// pin the same DB, so a frozen fixture SBOM always yields the same answer.
-	trivyCli: "sha256:1c60229e5bc7f5830bf8aeb829442cb01f71ce3cd5b4d1b754f1f166c9945951"
+	trivyCli: "sha256:55ad20f8a239a3e95427e60b8aaea38788550c18a3f1772976bebf732e6ae166"
 	trivyDb:  "sha256:35f26e97af328ec930bf41d86c6a34ca68c11d32ccd10d3de2b7ad856ed6e084"
 
 	// Slice 4

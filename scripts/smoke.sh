@@ -24,6 +24,9 @@ NAME="cv-smoke-${RUN_ID}"
 PORT="${APP_PORT:-44100}"
 ROLLOUT_TIMEOUT="${SMOKE_ROLLOUT_TIMEOUT:-120s}"
 CURL_MAX="${SMOKE_CURL_MAX:-15}"
+# Never  — crane/apko path: the image is in the OrbStack store (docker load).
+# IfNotPresent — CNB path: the image is a zot @sha256 ref, pulled by the kubelet.
+PULL_POLICY="${CV_IMAGE_PULL_POLICY:-Never}"
 
 cleanup() {
 	kubectl -n "$NS" delete deploy,svc -l "cv-oci/smoke=$RUN_ID" --ignore-not-found --wait=false >/dev/null 2>&1 || true
@@ -48,7 +51,7 @@ spec:
       containers:
         - name: app
           image: $IMAGE
-          imagePullPolicy: Never
+          imagePullPolicy: $PULL_POLICY
           env: [{ name: PORT, value: "$PORT" }]
           ports: [{ containerPort: $PORT }]
           readinessProbe:

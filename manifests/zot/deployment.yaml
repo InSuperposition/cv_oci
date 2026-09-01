@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zot
+  namespace: cv-pipeline
+  labels:
+    app.kubernetes.io/part-of: cv-oci
+    app.kubernetes.io/component: registry
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # RWO PVC — never two pods
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: cv-oci
+        app.kubernetes.io/component: registry
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: zot
+          # ghcr.io/project-zot/zot-minimal-linux-arm64:v2.1.5 — digest from
+          # digests.cue (images.zot), envsubst'd by bootstrap.sh.
+          image: ghcr.io/project-zot/zot-minimal-linux-arm64@${ZOT}
+          args: ["serve", "/etc/zot/config.json"]
+          ports:
+            - name: http
+              containerPort: 5000
+              # No hostPort. On OrbStack the VM loopback is forwarded to the
+              # Mac loopback, so a hostPort on 127.0.0.1 is unreachable from the
+              # cluster (and :5000 collides with macOS AirPlay Receiver anyway —
+              # Server: AirTunes). Instead: OrbStack routes the Kubernetes
+              # service DNS `zot.cv-pipeline.svc.cluster.local:5000` to BOTH the
+              # in-cluster network and the Mac's Docker daemon, so one address
+              # serves push (the buildpacks `create` step, via
+              # CNB_INSECURE_REGISTRIES) and pull (the kubelet). The one
+              # per-platform node step is adding that host to the daemon's
+              # insecure-registries — see docs/runbook.md.
+          readinessProbe:
+            httpGet: { path: /v2/, port: 5000 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /v2/, port: 5000 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - { name: storage, mountPath: /var/lib/registry }
+            - { name: config, mountPath: /etc/zot }
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: zot-storage
+        - name: config
+          configMap:
+            name: zot-config

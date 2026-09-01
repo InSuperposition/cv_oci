@@ -37,7 +37,27 @@ images: {
 	// debian/glibc + arm64 to match the distroless runtime base: the app's
 	// native deps (oxc-transform, esbuild, lightningcss) ship per-libc bindings
 	// (linux-arm64-gnu), so `npm ci` runs here, not in the musl pipeline-utils.
+	// crane/apko path only — deleted at Commit 1b.
 	nodeBuild: "sha256:e9b5516b06baeaea9a8e65a7aec6a85fbb960a30b52b66968f2c8092b3e2a3eb"
+
+	// --- CNB pivot (Commit 1a) ---
+	// docker.io/heroku/builder:24 — the CNB builder. arm64 CHILD digest (native
+	// build on the arm64 node). Every paketobuildpacks builder is amd64-only
+	// (probed 2026-09-01); Heroku's is genuinely multi-arch. See docs/gate-zero.md.
+	cnbBuilder: "sha256:e74d36e0e70f9b588f62483bef73a51809c1f51f04103dbb323293261bfc43aa"
+	// docker.io/heroku/heroku:24 — the CNB run image. arm64 child digest.
+	cnbRunImage: "sha256:d7a262713dc2686f231416b3a2b82796d42eeca31bc2f0b9b8eac747b456f7a9"
+	// docker.io/library/bash:5.1.4 — the vendored buildpacks task's prepare/results
+	// step image (multi-arch; upstream tektoncd/catalog pins this tag).
+	cnbUtilityImage: "sha256:b208215a4655538be652b2769d82e576bc4d0a2bb132144c060efc5be8c3f5d6"
+	// docker.io/alpine/k8s:1.31.1 — smoke/deploy runner (kubectl + curl + bash).
+	// arm64 child digest. Replaces pipeline-utils for the CNB pipeline.
+	cnbKubectlImage: "sha256:4a54840ba92ee07478bfdb5daf09d1e8ef16657dda92cfe8677c6baf557a7ea0"
+	// docker.io/alpine/git:latest — the CNB fetch step. arm64 child digest.
+	cnbGitImage: "sha256:922e413cfcd642ee87eda2da02462d86544ce3d2d0a0e43da1f3b83aabcb5730"
+	// ghcr.io/project-zot/zot-minimal-linux-arm64:v2.1.5 — the in-cluster
+	// registry (Commit 1a zot seed). arm64-native image.
+	zot: "sha256:55eafc5a16b0efb965786ccf75cd5fb7f76e3832a8bcd7f0da3983e689039a69"
 
 	// Slice 3
 	trivyCli: ""

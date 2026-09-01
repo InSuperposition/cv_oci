@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zot-storage
+  namespace: cv-pipeline
+  labels:
+    app.kubernetes.io/part-of: cv-oci
+    app.kubernetes.io/component: registry
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi

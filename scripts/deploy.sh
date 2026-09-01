@@ -32,6 +32,7 @@ printf '%s' "$DIGEST" | grep -Eqx 'sha256:[0-9a-f]{64}' || die "deploy: bad imag
 
 PORT="${APP_PORT:-44100}"
 ROLLOUT_TIMEOUT="${DEPLOY_ROLLOUT_TIMEOUT:-120s}"
+PULL_POLICY="${CV_IMAGE_PULL_POLICY:-Never}"
 
 prev="$(kubectl -n "$NS" get deploy/cv -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo none)"
 log_kv step=deploy prev="$prev" new="$IMAGE"
@@ -52,7 +53,7 @@ spec:
       containers:
         - name: app
           image: $IMAGE
-          imagePullPolicy: Never
+          imagePullPolicy: $PULL_POLICY
           env: [{ name: PORT, value: "$PORT" }]
           ports: [{ containerPort: $PORT }]
           readinessProbe:

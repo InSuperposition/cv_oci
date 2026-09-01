@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: zot
+  namespace: cv-pipeline
+  labels:
+    app.kubernetes.io/part-of: cv-oci
+    app.kubernetes.io/component: registry
+spec:
+  selector:
+    app.kubernetes.io/component: registry
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000

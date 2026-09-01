@@ -54,6 +54,31 @@ Verified 2026-08-30 on OrbStack k8s `v1.35.6+orb1` (runtime `docker://29.4.0`):
 Slice 1 therefore uses `crane` → tarball → `docker load` → run by digest. zot and
 a real pull-trust path arrive at Slice 3.
 
+### CNB pivot — the zot pull path (supersedes some of the above)
+
+Verified 2026-09-01 while wiring `pipeline/pipeline-cnb.yaml`. The 2026-08-30
+"daemon cannot resolve `*.svc`" finding was taken with `k8s.expose_services:
+false`. Turning it on changes the picture:
+
+```
+orb config set k8s.expose_services true      # then: orb stop / restart
+# ~/.orbstack/config/docker.json:
+{"insecure-registries":["zot.cv-pipeline.svc.cluster.local:5000"]}
+orb restart docker                            # ~30s, restarts the k8s cluster
+```
+
+With those two settings the OrbStack Docker daemon (the kubelet's puller) DOES
+resolve and pull plain-HTTP from `zot.cv-pipeline.svc.cluster.local:5000`.
+Because OrbStack routes that name to both the in-cluster network and the Mac
+daemon, **one address serves push and pull** — no two-address split, no
+hostPort. (hostPort on `127.0.0.1` does not work on OrbStack anyway: the VM
+loopback is forwarded to the Mac loopback, and `:5000` there is macOS AirPlay
+Receiver — `Server: AirTunes`.)
+
+`k8s.expose_services` + the `insecure-registries` entry are the documented
+per-platform node steps. A portable cluster substitutes its own registry
+ingress + trust config.
+
 ## Slice 1
 
 ### `scripts/test/e2e.sh` or `negative.sh` fails

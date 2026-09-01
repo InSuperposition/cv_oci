@@ -10,7 +10,6 @@ each slice.
 | CNB `buildpacks` task `prepare` step runs as root (uid 0) | it `chown`s `/layers`, `/tekton/home` and the source workspace to the builder uid; the upstream tektoncd/catalog task does this and there is no non-root variant | a rootless CNB prepare path exists, or PSA `restricted` is enforced on `cv-pipeline` | vendor a non-root prepare, or pre-own the workspaces via `fsGroup` + an init container |
 | CNB app image lives in plain-HTTP zot (no TLS, no auth) | the zot seed is unauthenticated by design; TLS on a solo single-node cluster protects nothing new | Slice 6 (authz) / any second node | Slice 6 → htpasswd + TLS; multi-node → real registry ingress |
 | zot `NetworkPolicy` not applied in the seed | a namespace-scoped policy blocks the Tekton resolver + future Flux (different namespaces); the consumer set is not enumerated yet | Slice 3 | Slice 3 → NetworkPolicy with consumers: `cv-pipeline`, `tekton-pipelines-resolvers`, `flux-system` |
-| CNB builds are not byte-reproducible (two builds of one SHA differ) | the lifecycle does not honour `SOURCE_DATE_EPOCH` / normalise layer order by default | the determinism lesson (Slice 2) | Slice 2 → `SOURCE_DATE_EPOCH` + layer normalisation; assert equal SBOM package set + app-layer content hash, not raw digest |
 | No build cache (`SKIP_RESTORE=true`) | 1-dep app; a cache is another determinism variable and a zot round-trip per build | build time bites as `cv_frontend` deps grow | zot `CACHE_IMAGE` (TODOS.md: npm cache) |
 | Registry-trust bootstrap is per-platform node config (`k8s.expose_services` + `docker.json` insecure-registries) | Kubernetes treats registry trust as node/runtime config; unavoidable | — | documented per-platform step in `docs/runbook.md`, not "fixed" |
 | Flat kustomize bases as config tooling | the Timoni end state is not proven yet; minimal scaffolding avoids sunk work | Slice 7 lands | Slice 7 → Timoni modules |
@@ -18,3 +17,9 @@ each slice.
 | `npm ci` runs cold every build | see "no build cache" above | — | — |
 | Rule 4 portability is asserted, not tested | no second cluster exists yet | before Slice 5 | TODOS.md: portability kind-CI |
 | `validate.sh` fetches the Kubernetes core schema set from a version-pinned URL, not a vendored copy | the full standalone set is hundreds of files; a pinned URL is reproducible enough for a local learning repo | validation needs to run offline / in air-gapped CI | vendor `schemas/k8s/v1.31.0/` |
+
+## Resolved
+
+| Was | Finding | Fix |
+|---|---|---|
+| "CNB builds are not byte-reproducible; the lifecycle does not honour `SOURCE_DATE_EPOCH`" | Not the lifecycle. Two independent builds of one fixture SHA already agreed on the SBOM layer and 10 of 12 other layer diffIDs, gzip-compressed digests included (`created` is pinned to `1980-01-01T00:00:01Z`). The **only** drift was the app layer, caused by our own `fetch` step leaving `.git/` (— `.git/index` stat cache, `.git/logs/HEAD` reflog timestamps —) in the source tree for the buildpack to copy in. | `pipeline/pipeline.yaml` `fetch` step `rm -rf .git` after the SHA is captured. Builds are now byte-for-byte reproducible (identical outer image digest). Guarded by `scripts/test/repro.sh` (Slice 2). |

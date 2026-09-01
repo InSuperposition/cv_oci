@@ -65,8 +65,14 @@ Gotchas found while wiring this:
 
 ## The pipeline
 
-### `scripts/test/e2e.sh` or `negative.sh` fails
+### `scripts/test/e2e.sh`, `negative.sh` or `repro.sh` fails
 
+- **`repro.sh`:** builds the pinned fixture SHA twice (namespaces
+  `cv-repro-<uid>-1` / `-2`) and asserts the two builds' app-layer and
+  SBOM-layer content hashes agree. A FAIL on the app-layer check means
+  something this-run-specific leaked into `/workspace/source` — check the
+  `fetch` step still does `rm -rf .git` (the historical culprit; `docs/debt.md`
+  Resolved). `repro.sh --keep` leaves both namespaces + `_artifacts`.
 - **Check:** `e2e.sh --keep` leaves the `cv-cnb-e2e-<uid>` namespace, the
   run-scoped zot repo, and the evidence in `scripts/test/_artifacts/<ns>/`
   (pipelinerun.yaml, taskruns.yaml, events.txt, pipeline.log, deployed.yaml).

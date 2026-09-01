@@ -276,7 +276,7 @@ Delete `tasks/assemble.yaml`, `tasks/build.yaml`, `tasks/resolve.yaml` (folded),
 | Slice 1 (tracer bullet) | replaced | gate zero + Commit 1a/1b (CNB reference lane) |
 | Slice 1.5 zot seed (replan, two-address) | yes | prerequisite for Commit 1a (needs a registry) |
 | Slice 1.5 (per-stage SAs) | yes | a later commit, unchanged intent — now also splits the `dockerconfig`/`prepare-root` grants |
-| Slice 2 (determinism) | reframed | reproducibility test = build `cv_frontend@SHA` twice, assert equal SBOM package set + equal app-layer content hash (not raw digest); repro CronJob unchanged |
+| Slice 2 (determinism) | **done (test + fix)** | `scripts/test/repro.sh` builds `cv_frontend@SHA` twice, asserts equal app-layer + SBOM-layer content hash (lifecycle's own `io.buildpacks.lifecycle.metadata` diffIDs) + equal outer digest (bonus). Root cause was `.git/` bleed-through, fixed in `fetch`. Repro CronJob deferred to TODOS.md (no persistent cluster yet — same gate as portability kind-CI). |
 | Slice 3 (CVE gate + SBOM) | yes | CNB emits the SBOM (Syft/SPDX via Paketo); add the Trivy CVE gate; drop the old "Trivy authors, zot stores" split note (CNB authors now) |
 | Slice 4 (Chains: build run + verify+deploy run) | **mechanism changed** | Chains observes `APP_IMAGE_URL`/`APP_IMAGE_DIGEST`. The full provenance chain needs the task to emit builder/buildpack/run-image digests as typed results — task-authoring work (Decision 8). Then the two-run split is unchanged. |
 | Slice 5 (amd64 + multi-arch index) | yes | still gated on an amd64 node; Tekton Matrix over `arch`, one Paketo builder per arch |
@@ -297,9 +297,13 @@ Delete `tasks/assemble.yaml`, `tasks/build.yaml`, `tasks/resolve.yaml` (folded),
 3. **`prepare` root step vs PSA** — does the pipeline namespace need `privileged`
    PSA, or can the root exception be scoped tighter? Check against the running
    cluster in Commit 1a.
-4. **Reproducibility with CNB** — does the Paketo lifecycle honor
-   `SOURCE_DATE_EPOCH` / produce byte-stable layers across two builds of one SHA?
-   Answered by the Slice 2 reproducibility test.
+4. **Reproducibility with CNB** — RESOLVED 2026-09-01, Slice 2. The lifecycle
+   is already deterministic (SBOM layer + 10/12 layer diffIDs + gzip digests
+   matched across two independent builds; `created` is pinned to
+   `1980-01-01T00:00:01Z`). The lone drift was the app layer, from our `fetch`
+   step leaving `.git/` for the buildpack to copy in. `fetch` now does
+   `rm -rf .git`; builds are byte-for-byte reproducible. `docs/debt.md`
+   (Resolved) + `scripts/test/repro.sh`.
 
 ## Deferred
 
@@ -390,10 +394,16 @@ build). zot pull path is one address, not two (OrbStack `k8s.expose_services`
    `scripts/{smoke,deploy}.sh` (fold into the CNB pipeline or keep as the
    inline logic's source), `scripts/test/{e2e,negative}.sh`. Rename `-cnb`
    tests into place. One green pipeline, `validate.sh` green.
-5. **Slice commits** per the migration table: per-stage SAs → determinism → CVE +
-   SBOM → Chains (with the provenance-authoring work) → multi-arch → promotion →
-   GitOps → OpenBao. Merge `pipeline-restructure.md`'s reference material into a
-   single SSOT after 1b.
+5. **Slice commits** per the migration table:
+   - **DONE — per-stage SAs.** `cv-pipeline-sa` split into `cv-build-sa` (no
+     RBAC, no token) / `cv-smoke-sa` / `cv-deploy-sa`, wired via
+     `taskRunSpecs`. Commit `d956572`.
+   - **DONE — determinism.** `scripts/test/repro.sh` + the `.git`-strip fix in
+     `fetch`. Open Question 4 resolved. Repro CronJob → TODOS.md.
+   - next: CVE + SBOM → Chains (with the provenance-authoring work) →
+     multi-arch → promotion → GitOps → OpenBao.
+   Merge `pipeline-restructure.md`'s reference material into a single SSOT
+   after 1b.
 6. **`packs` project** — separate, later, its own design doc.
 
 ## What I noticed about how you think

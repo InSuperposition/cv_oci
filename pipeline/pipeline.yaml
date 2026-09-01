@@ -69,6 +69,13 @@ spec:
               for p in $(params.contract); do [ -e "$p" ] || miss="$miss $p"; done
               [ -z "$miss" ] || { echo "cv_frontend contract violation, missing:$miss" >&2; exit 1; }
               echo "contract ok"
+              # Strip .git before the buildpack copies the source tree into the
+              # app layer. .git/index (stat cache) and .git/logs/HEAD (reflog
+              # timestamps) both carry this-run wall-clock data, and left in
+              # place they are the sole source of app-layer nondeterminism
+              # (Slice 2 reproducibility test / docs/designs/buildpacks-pivot.md).
+              # The SHA is already captured above; nothing downstream needs .git.
+              rm -rf .git
 
     - name: build
       runAfter: [fetch]

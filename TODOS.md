@@ -24,6 +24,20 @@ triggers) — this is new work not yet scheduled into a slice.
 - **Effort:** L (human) / M (CC), spread over many commits.
 - **Depends on:** the cv_oci CNB curriculum being further along; never blocks it.
 
+### Reproducibility CronJob
+- **What:** a Tekton `CronJob` (or scheduled PipelineRun) that reruns
+  `scripts/test/repro.sh`'s two-build comparison weekly against the pinned
+  fixture SHA and fails loudly on app-layer / SBOM-layer content-hash drift.
+- **Why:** `repro.sh` proves reproducibility at a point in time; the CronJob
+  catches a regression from a builder/lifecycle bump between slices.
+- **Context:** Slice 2 (`docs/designs/buildpacks-pivot.md`). The executable
+  test landed; the CronJob is deferred for the same reason as the portability
+  kind-CI below — it needs a persistent always-on cluster to be worth the
+  cluster-wide namespace-create RBAC it requires. OrbStack is torn down
+  between sessions.
+- **Effort:** S.
+- **Depends on:** a persistent cluster (same gate as portability CI).
+
 ### Portability CI check (kind / k3d)
 - **What:** scheduled run of `bootstrap.sh` + the Slice 1 pipeline on a vanilla
   kind or k3d cluster.

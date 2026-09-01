@@ -971,10 +971,11 @@ specific finding. JSONL: `~/.gstack/projects/InSuperposition-cv_oci/tasks-eng-re
   `pipeline-restructure-review-2026-08-30.md` (SSOT merge complete).
   - Surfaced by: the SSOT merge — all still-valid content is now in this doc.
   - **Done** in `40b530d` — only historical mentions remain (`CLAUDE.md`).
-- [ ] **T4 (P3, human: ~15min)** — git — push `cnb-pivot` (or merge to `main` +
-  push) so the git resolver can reach `pipeline.yaml`.
+- [x] **T4 (P3, human: ~15min)** — git — push `cnb-pivot` so the git resolver
+  can reach `pipeline.yaml`.
   - Surfaced by: Slice 4 dependency — `status.provenance.refSource` needs the
     pipeline git-resolved from GitHub.
+  - **Done** — `cnb-pivot` pushed to `origin`, tracking set.
 
 ## GSTACK REVIEW REPORT
 

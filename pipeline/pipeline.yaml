@@ -50,6 +50,17 @@ spec:
           - name: clone-and-assert
             image: $(params.image)
             workingDir: $(workspaces.source.path)
+            # Slice 1.7: uid 1000 so the checked-out tree is 1000-owned from
+            # creation. fsGroup 1000 (PipelineRun podTemplate) makes the PVC
+            # group-writable; the `build` task's steps then read/delete it
+            # without a root chown. Full restricted set for PSA admission.
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              runAsGroup: 1000
+              allowPrivilegeEscalation: false
+              capabilities: { drop: ["ALL"] }
+              seccompProfile: { type: RuntimeDefault }
             script: |
               #!/bin/sh
               set -eu

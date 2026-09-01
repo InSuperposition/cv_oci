@@ -49,6 +49,10 @@ cleanup() {
 trap cleanup EXIT
 
 kubectl create ns "$NS" >/dev/null
+# Match cv-pipeline's PSA level so the run really exercises `restricted` (Slice 1.7).
+kubectl label ns "$NS" \
+	pod-security.kubernetes.io/enforce=restricted \
+	pod-security.kubernetes.io/enforce-version=latest >/dev/null
 sed "s/namespace: cv-pipeline/namespace: $NS/" manifests/rbac.yaml | kubectl apply -f - >/dev/null
 kubectl -n "$NS" apply -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
 

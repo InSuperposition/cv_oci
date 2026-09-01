@@ -4,7 +4,7 @@
 # Ordered, --wait-gated, idempotent. Re-running on a ready cluster is a no-op.
 #
 #   phase 1  Tekton Pipelines v1.15.1 (vendored, checksum-pinned)
-#   phase 2  verify the git resolver is enabled (on by default in v1.15.1)
+#   phase 2  feature flags: git resolver + set-security-context (Slice 1.7 PSA)
 #   phase 3  cv-pipeline namespace + RBAC + ServiceAccount
 #   phase 4  zot seed + the cv-build pipeline (docs/designs/buildpacks-pivot.md)
 #
@@ -54,7 +54,7 @@ kubectl wait --for=condition=Available --timeout=180s -n tekton-pipelines-resolv
 	deploy/tekton-pipelines-remote-resolvers >/dev/null
 
 # ---- phase 2 -------------------------------------------------------------
-phase 2 "git resolver"
+phase 2 "feature flags"
 enabled="$(kubectl get configmap resolvers-feature-flags -n tekton-pipelines-resolvers \
 	-o jsonpath='{.data.enable-git-resolver}' 2>/dev/null || echo '')"
 if [ "$enabled" = "true" ]; then
@@ -65,6 +65,23 @@ else
 	kubectl rollout restart deploy/tekton-pipelines-remote-resolvers -n tekton-pipelines-resolvers >/dev/null
 	kubectl rollout status deploy/tekton-pipelines-remote-resolvers -n tekton-pipelines-resolvers --timeout=120s >/dev/null
 	log_kv step=git-resolver action=enabled
+fi
+
+# Slice 1.7: cv-pipeline enforces PodSecurity `restricted`. Tekton injects init
+# containers (prepare, working-dir-initializer, place-scripts) and the results
+# sidecar; set-security-context=true makes the controller stamp a
+# restricted-compliant securityContext on them. Without it every PipelineRun in
+# cv-pipeline is rejected at admission. Needs a controller restart to take.
+secctx="$(kubectl get configmap feature-flags -n tekton-pipelines \
+	-o jsonpath='{.data.set-security-context}' 2>/dev/null || echo '')"
+if [ "$secctx" = "true" ]; then
+	log_kv step=set-security-context state=enabled
+else
+	kubectl patch configmap feature-flags -n tekton-pipelines \
+		--type merge -p '{"data":{"set-security-context":"true"}}' >/dev/null
+	kubectl rollout restart deploy/tekton-pipelines-controller -n tekton-pipelines >/dev/null
+	kubectl rollout status deploy/tekton-pipelines-controller -n tekton-pipelines --timeout=180s >/dev/null
+	log_kv step=set-security-context action=enabled
 fi
 
 # ---- phase 3 -----------------------------------------------------------

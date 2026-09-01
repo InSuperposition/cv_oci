@@ -136,6 +136,10 @@ wait_done() { # wait_done <ns> <prn>  -> prints True|False|timeout
 
 seed_ns() { # seed_ns <ns>
 	kubectl create ns "$1" >/dev/null
+	# Match cv-pipeline's PSA level so the run really exercises `restricted` (Slice 1.7).
+	kubectl label ns "$1" \
+		pod-security.kubernetes.io/enforce=restricted \
+		pod-security.kubernetes.io/enforce-version=latest >/dev/null
 	sed "s/namespace: cv-pipeline/namespace: $1/" manifests/rbac.yaml | kubectl apply -f - >/dev/null
 	kubectl -n "$1" apply -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
 }

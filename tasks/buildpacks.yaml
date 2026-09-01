@@ -13,11 +13,10 @@
 #     (section-aware awk), not a bare `grep digest` — the [build] table's
 #     [[build.bom]] metadata can carry its own `digest` key. Fails loud if
 #     [image].digest is absent (Rule 13). Covered by scripts/test/report-digest.bats.
-#
-# Root exception: the `prepare` step runs as root (uid 0) to chown /layers,
-# /tekton/home and the source workspace to the builder uid. This is the one
-# privileged bit in the CNB pipeline (mirrors the retired `assemble` docker-load
-# exception). Recorded in docs/debt.md. The `create` step drops to uid 1000.
+#   - Slice 1.7: stepTemplate.securityContext runs every step uid 1000,
+#     PSA-restricted; the `prepare` step's `chown -R` (its only root use) is
+#     deleted — `fetch` writes the source tree as 1000 and fsGroup 1000 makes
+#     the PVC + emptyDir volumes group-writable. No root anywhere in the task.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
@@ -105,6 +104,18 @@ spec:
     env:
       - name: CNB_PLATFORM_API
         value: "$(params.CNB_PLATFORM_API)"
+    # Slice 1.7 (docs/designs/buildpacks-pivot.md): every step runs uid 1000,
+    # PSA-restricted. The `prepare` chown is gone — `fetch` writes the source
+    # tree as 1000 and fsGroup 1000 (PipelineRun podTemplate) makes the PVC and
+    # the emptyDir layers/platform volumes group-writable. The `create` step
+    # already passes -uid=1000/-gid=1000 to the lifecycle creator.
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      allowPrivilegeEscalation: false
+      capabilities: { drop: ["ALL"] }
+      seccompProfile: { type: RuntimeDefault }
 
   steps:
     - name: prepare
@@ -116,19 +127,12 @@ spec:
         #!/usr/bin/env bash
         set -e
 
-        if [[ "$(workspaces.cache.bound)" == "true" ]]; then
-          echo "> Setting permissions on '$(workspaces.cache.path)'..."
-          chown -R "$(params.USER_ID):$(params.GROUP_ID)" "$(workspaces.cache.path)"
-        fi
-
-        for path in "/tekton/home" "/layers" "$(workspaces.source.path)"; do
-          echo "> Setting permissions on '$path'..."
-          chown -R "$(params.USER_ID):$(params.GROUP_ID)" "$path"
-
-          if [[ "$path" == "$(workspaces.source.path)" ]]; then
-              chmod 775 "$(workspaces.source.path)"
-          fi
-        done
+        # Slice 1.7: the upstream task's `chown -R` on /layers, /tekton/home and
+        # the source workspace is gone. Every step runs uid 1000 and fsGroup
+        # 1000 (PipelineRun podTemplate) makes the PVC and the emptyDir volumes
+        # group-owned 1000; `fetch` already writes the tree as 1000. A cache
+        # workspace is never bound here (SKIP_RESTORE=true), and a root chown is
+        # not possible under PSA `restricted` anyway.
 
         echo "> Parsing additional configuration..."
         parsing_flag=""
@@ -190,9 +194,6 @@ spec:
           mountPath: /layers
         - name: $(params.PLATFORM_DIR)
           mountPath: /platform
-      securityContext:
-        runAsUser: 1000
-        runAsGroup: 1000
 
     - name: results
       image: $(params.UTILITY_IMAGE)

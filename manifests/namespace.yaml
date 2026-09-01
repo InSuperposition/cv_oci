@@ -4,3 +4,12 @@ metadata:
   name: cv-pipeline
   labels:
     app.kubernetes.io/part-of: cv-oci
+    # Slice 1.7 (docs/designs/buildpacks-pivot.md). Every pod in the build
+    # pipeline runs uid 1000 + fsGroup 1000: `fetch` and the `buildpacks` task
+    # steps carry an explicit restricted securityContext, and Tekton's own init
+    # containers are made compliant by feature-flags set-security-context=true
+    # (bootstrap.sh phase 2).
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

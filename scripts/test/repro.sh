@@ -78,6 +78,10 @@ cleanup() {
 		log_kv step=repro action=kept ns1="$NS1" ns2="$NS2" artifacts="$ART"
 	else
 		kubectl delete ns "$NS1" "$NS2" --wait=false >/dev/null 2>&1 || true
+		# best-effort: drop the run-scoped zot tags (the zot image has no shell,
+		# so `kubectl exec -- rm` is not an option — use the registry API)
+		crane delete --insecure "${APP_REPO1}:git-${FIXTURE_SHA}" >/dev/null 2>&1 || true
+		crane delete --insecure "${APP_REPO2}:git-${FIXTURE_SHA}" >/dev/null 2>&1 || true
 		rm -rf "$ART"
 	fi
 	exit $rc

@@ -83,7 +83,8 @@ Gotchas found while wiring this:
   run); Service-endpoint lag (smoke/deploy retry `/healthz` 10x — a persistent
   failure means the image genuinely doesn't serve); zot PVC full.
 - **Cleanup after `--keep`:** `kubectl delete ns cv-cnb-e2e-<uid>`;
-  `kubectl -n cv-pipeline exec deploy/zot -- rm -rf /var/lib/registry/cv-e2e-<uid>`;
+  `crane delete --insecure zot.cv-pipeline.svc.cluster.local:5000/cv-e2e-<uid>:git-<sha>`
+  (the zot image has no shell — `kubectl exec -- rm` does not work);
   `rm -rf scripts/test/_artifacts`.
 
 ### A PipelineRun is stuck / a stale `cv` Deployment is running

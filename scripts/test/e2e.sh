@@ -64,8 +64,9 @@ cleanup() {
 		log_kv step=e2e action=kept ns="$NS" repo="$APP_REPO" artifacts="$ART"
 	else
 		kubectl delete ns "$NS" --wait=false >/dev/null 2>&1 || true
-		# best-effort: drop the run-scoped zot repo
-		kubectl -n cv-pipeline exec deploy/zot -- rm -rf "/var/lib/registry/cv-e2e-${UID_SUFFIX}" >/dev/null 2>&1 || true
+		# best-effort: drop the run-scoped zot tag (the zot image has no shell,
+		# so `kubectl exec -- rm` is not an option — use the registry API)
+		crane delete --insecure "${APP_REPO}:git-${FIXTURE_SHA}" >/dev/null 2>&1 || true
 		rm -rf "$ART"
 	fi
 	exit $rc

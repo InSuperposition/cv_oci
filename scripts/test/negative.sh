@@ -14,7 +14,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck source=scripts/lib/log.sh
 source "$ROOT/scripts/lib/log.sh"
 cd "$ROOT"
-need kubectl; need tkn
+need kubectl; need tkn; need crane
 
 # shellcheck disable=SC1091
 source digests.env
@@ -36,10 +36,14 @@ nonempty_not() { [ -n "$1" ] && [ "$1" != "$2" ]; }
 
 UID_SUFFIX="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 NS="cv-neg-${UID_SUFFIX}"
+ZOT_REPO="${ZOT_ADDR}/cv-neg-${UID_SUFFIX}"
 cleanup() {
 	local rc=$?
 	kubectl delete ns "$NS" --wait=false >/dev/null 2>&1 || true
-	kubectl -n cv-pipeline exec deploy/zot -- rm -rf "/var/lib/registry/cv-neg-${UID_SUFFIX}" >/dev/null 2>&1 || true
+	# best-effort: drop any run-scoped zot tag (the zot image has no shell, so
+	# `kubectl exec -- rm` is not an option — use the registry API). Only the
+	# pre-/healthz scenario pushes a tag; the bad-ref one fails before build.
+	crane delete --insecure "${ZOT_REPO}:git-${PRE_HEALTHZ_SHA}" >/dev/null 2>&1 || true
 	exit $rc
 }
 trap cleanup EXIT

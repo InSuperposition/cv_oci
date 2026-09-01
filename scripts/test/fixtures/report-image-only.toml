@@ -1,0 +1,5 @@
+# Lifecycle export report, buildpacks emitted no BOM entries.
+[image]
+tags = ["zot.cv-pipeline.svc.cluster.local:5000/cv-e2e-abcd:git-cb333ee"]
+digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+manifest-size = 2412

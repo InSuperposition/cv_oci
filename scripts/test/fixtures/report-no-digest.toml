@@ -1,0 +1,5 @@
+# Lifecycle export report with no [image].digest (e.g. a daemon-only export).
+# The results step must fail loud rather than emit an empty digest (Rule 13).
+[image]
+tags = ["zot.cv-pipeline.svc.cluster.local:5000/cv-e2e-abcd:git-cb333ee"]
+manifest-size = 2412

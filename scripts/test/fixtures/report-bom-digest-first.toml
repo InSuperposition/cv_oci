@@ -1,0 +1,21 @@
+# Lifecycle export report where a buildpack recorded a downloaded-artifact
+# digest in its BOM metadata. The [build] table marshals before [image], so a
+# bare `grep digest` hits this sha first and builds a garbage @sha256 ref.
+[build]
+
+[[build.bom]]
+name = "node"
+version = "22.11.0"
+
+[build.bom.metadata]
+digest = "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+name = "node"
+
+[build.bom.buildpack]
+id = "heroku/nodejs-engine"
+version = "3.6.4"
+
+[image]
+tags = ["zot.cv-pipeline.svc.cluster.local:5000/cv-e2e-abcd:git-cb333ee"]
+digest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+manifest-size = 2412

@@ -9,6 +9,10 @@
 #   - Added the CNB_INSECURE_REGISTRIES param, wired into the `create` step env
 #     so the lifecycle creator can push to a plain-HTTP in-cluster registry.
 #   - Added the CNB_PLATFORM_API param.
+#   - The `results` step reads `digest` from report.toml's [image] table only
+#     (section-aware awk), not a bare `grep digest` — the [build] table's
+#     [[build.bom]] metadata can carry its own `digest` key. Fails loud if
+#     [image].digest is absent (Rule 13). Covered by scripts/test/report-digest.bats.
 #
 # Root exception: the `prepare` step runs as root (uid 0) to chown /layers,
 # /tekton/home and the source workspace to the builder uid. This is the one
@@ -194,9 +198,28 @@ spec:
       image: $(params.UTILITY_IMAGE)
       script: |
         #!/usr/bin/env bash
-        set -e
-        grep "digest" /layers/report.toml | cut -d'"' -f2 | cut -d'"' -f2 | tr -d '\n' | tee "$(results.APP_IMAGE_DIGEST.path)"
-        echo -n "$(params.APP_IMAGE)" | tee "$(results.APP_IMAGE_URL.path)"
+        set -eu
+
+        # report.toml has an [image] table and, when buildpacks emit a BOM, a
+        # preceding [build] table whose [[build.bom]] metadata may hold its own
+        # `digest` key. Read `digest` from [image] only — a bare `grep digest`
+        # would take whichever line comes first. Struct: buildpacks/lifecycle
+        # platform/files/report.go (Report.Image.Digest).
+        digest="$(awk '
+          /^\[/            { in_image = ($0 ~ /^\[image\][ \t]*$/); next }
+          in_image && $1 == "digest" {
+            v = $0; sub(/^[^=]*=[ \t]*/, "", v); gsub(/[" \t]/, "", v)
+            print v; exit
+          }
+        ' /layers/report.toml)"
+
+        if [ -z "$digest" ]; then
+          echo "buildpacks: no [image].digest in /layers/report.toml" >&2
+          exit 1
+        fi
+
+        printf '%s' "$digest"             | tee "$(results.APP_IMAGE_DIGEST.path)"
+        printf '%s' "$(params.APP_IMAGE)" | tee "$(results.APP_IMAGE_URL.path)"
       volumeMounts:
         - name: layers-dir
           mountPath: /layers

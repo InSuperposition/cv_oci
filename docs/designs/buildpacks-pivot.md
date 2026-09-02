@@ -1144,6 +1144,14 @@ JSONL: `~/.gstack/projects/InSuperposition-cv_oci/tasks-eng-review-20260901-2134
 
 - **CODEX:** `codex exec` stalls on this repo (learning `codex-exec-stalls-cv-oci-confirmed`, 5+ attempts). Claude subagent ran the outside voice.
 - **CROSS-MODEL:** the 2026-09-01 run converged on the reconstruction spine (CM-1-A superseded, Timoni cut, reconstruction as the organizing idea). The **2026-09-02 Slice 4 run** had two cross-model disagreements, both resolved by the user: (1) OpenBao timing — outside voice said it gates the distinctive Slices 5–6; user chose to split it out entirely into a standalone `cv_openbao` repo. (2) zot TLS mechanism — outside voice said a `bootstrap.sh` openssl block; user overrode → cert-manager + trust-manager (declarative, GitOps-native). The outside voice's other hits (pubkey-from-cluster bisect bug, the bogus OrbStack node-CA row, the cert-manager→PKI churn, P6/P10 overclaims, the compressed OpenBao bash) were applied as straight corrections.
-- **VERDICT (2026-09-02):** ENG REVIEW COMPLETE — Slice 4 re-spec'd. OpenBao removed from cv_oci → `cv_openbao` (new repo, deferred). Slice 4 = zot TLS (cert-manager + trust-manager) + Chains x509 signing + provenance authoring + `sigstore-bundle` referrers. Next: Slice 4 → 5 → 6. Probe P5 before Slice 5; P10 + predicate-shape check early in Slice 4. Tasks T1–T8 in `~/.gstack/projects/InSuperposition-cv_oci/tasks-eng-review-20260902-110518.jsonl`.
+- **VERDICT (2026-09-02):** ENG REVIEW COMPLETE — Slice 4 re-spec'd, then
+  **SHIPPED**. OpenBao removed from cv_oci → `cv_openbao` (new repo, deferred).
+  Slice 4 = zot TLS (cert-manager) + Chains x509 signing + provenance materials
+  + `sigstore-bundle` + SBOM/verdict referrers. Commits `66048c2` (T1),
+  `6f8cb55` (T2/T8), `c63d6dc` (T3-defer), `fc1fd95` (T4/T5/T6). All verified:
+  e2e 21/21, negative 12/12, repro 3/3. P8/P9/P10 resolved. **Next: Slice 5**
+  (GitOps via `cv_gitops`; run **probe P5** first) → Slice 6 (`reconstruct.sh`).
+  T3 + a T4-followup (`APP_SOURCE_DIGEST`, `BUILDPACKS`, git-resolve,
+  PipelineRun-level provenance) carried as debt.
 
 NO UNRESOLVED DECISIONS

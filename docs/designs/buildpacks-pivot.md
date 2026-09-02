@@ -473,7 +473,7 @@ CA-consuming namespaces grows.
 | Client | today | Slice 4 |
 |---|---|---|
 | Tekton Chains controller | **fails** (HTTPS-only client, no insecure knob) | **T2 DONE** — `SSL_CERT_DIR=/etc/ssl/certs:/etc/cv-oci-ca` + the `cv-oci-ca-bundle` Secret mounted (`controller-ca-patch.yaml`). Build TaskRun `signed: true`; `oras discover` finds the `sigstore-bundle`; `cosign verify` + `verify-attestation` pass. |
-| lifecycle `create`, trivy `scan` | `--insecure` / `CNB_INSECURE_REGISTRIES` | mount `ca.crt` from the `zot-tls` Secret (YAML anchor); drop the insecure flags (T3). Until T3, the existing `--insecure` flags tolerate the self-signed cert, so e2e stays green after T1. |
+| lifecycle `create`, trivy `scan` | `--insecure` / `CNB_INSECURE_REGISTRIES` | **T3 deferred** (eng review 2026-09-02) — the `zot-tls` Secret lives in `cv-pipeline` but the pipeline runs in throwaway test namespaces; distributing the CA into each is machinery for a negligible threat on a single-node solo cluster. Keep `--insecure`. Revisit when the pipeline runs in a stable namespace (Slice 5) or trust-manager lands. `debt.md`. |
 | host `crane` / `oras` / `cosign` | `--insecure` | keep `--insecure` (host-only, low stakes) or `SSL_CERT_FILE` |
 | OrbStack node (kubelet pull) | `docker.json` insecure-registries | **unchanged** — `insecure-registries` already means "accept an unverified TLS cert for this host" |
 

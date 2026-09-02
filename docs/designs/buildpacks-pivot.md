@@ -625,28 +625,51 @@ mandates stand on roadmap / direction grounds; the concrete gaps it raised
 (probes P11a-c, P13, zot tag immutability, unstated RBAC deps) are folded in
 below.
 
-**Slice 5 re-architecture — PENDING A DEDICATED DESIGN PASS (2026-09-02).** A
-`/plan-eng-review` of the first 5a Chainsaw port (commit `8f2dfa2`) found the
-port leaned on `script:` shell for ~60% of its checks (the "bash relocated into
-YAML" the outside voice predicted). The user's direction: **declarative config
-is a project goal; use the stack to eliminate scripts.** Two decisions landed,
-the rest is deferred to a fresh design pass:
+**Slice 5 re-architecture — RESOLVED (2026-09-02, `/office-hours` +
+`/plan-eng-review`).** A `/plan-eng-review` of the first 5a Chainsaw port
+(commit `8f2dfa2`) found the port leaned on `script:` shell for ~60% of its
+checks. The user's direction: **declarative config is a project goal; use the
+stack to eliminate scripts** — but not by adding tools.
 - **`scripts/gen-digests.sh` → `digests_tool.cue`** (decision `f059f419`): a CUE
   `_tool.cue` workflow (`cue cmd gen`, `tool/file.Create`, zero shell) fans
   `digests.cue` out to `digests.env`, `params.yaml`, `tests/digests.json`
   (Chainsaw `--values`), and later the tofu digest vars. Timoni modules import
   `digests.cue` as a CUE package directly.
-- **Kyverno becomes a core plane** (decision `7e6275c3`): policy + admission
-  verification — `verifyImages` (cosign signature + SLSA/SBOM attestation, likely
-  reducing Flux `spec.verify` and retiring probes P11a/b/c on Flux),
-  pod-security (folding in Slice 1.7's PSA labels), `require-image-digest`,
-  `mutate` defaults, and `generate` per-namespace SAs+RBAC (removes the
-  `sed manifests/rbac.yaml` hack). Chainsaw tests policies directly
-  (apply violating resource → assert denied). Ripples into Slices 1.7 / 4 / 5c.
-- **Next:** `/office-hours` then `/plan-eng-review` on "Kyverno as cv_oci's
-  policy plane" — full tool-ownership map, seams, migration order, probes —
-  before implementing. The current `tests/` (commit `8f2dfa2`) is parked; it
-  will be substantially rewritten against Kyverno admission.
+- **Kyverno is DEFERRED, NOT a core plane** (decision `04eb7e62`, supersedes
+  `7e6275c3`). Office-hours + two adversarial rounds converged on adopting
+  Kyverno (a `generate` policy as the single source of per-namespace RBAC; a
+  `require-image-digest` validate policy). The eng-review outside voice
+  challenged it and the user accepted: the digest policy fires on nothing
+  (`deploy`/`smoke` already build `@sha256` refs; 5c makes it redundant),
+  single-source `generate` moves `cv-pipeline`'s pipeline identity behind an
+  async background reconciler on a no-redundancy node, `generateExisting` won't
+  cleanly migrate live RBAC, and `bootstrap.sh` (frozen) has no home for the
+  install until `tofu/` in 5c. Rule 14 ("admission control only if ever") stays.
+  Kyverno may return as a scoped portfolio demo policy — production RBAC stays
+  static YAML — after P11a and 5c (`TODOS.md` P2).
+- **The `sed manifests/rbac.yaml` hack is killed declaratively with no new
+  tool**: the Chainsaw tests apply the pipeline RBAC into their ephemeral
+  namespace via a namespace-templated resource (`($namespace)` binding),
+  `manifests/rbac.yaml` stays static and `cv-pipeline`-scoped, `bootstrap.sh`
+  untouched. Design doc:
+  `~/.gstack/projects/InSuperposition-cv_oci/tensor-main-design-20260902-165511.md`.
+  Exact templating mechanism (a templated `tests/_resources/` file vs a CUE
+  `rbac.cue` single source) is probed at the start of 5a.
+- The current `tests/` (commit `8f2dfa2`) is parked; 5a rewrites the 4
+  pipeline-running suites to drop the `sed` line for the templated apply.
+
+**Slice 5a IMPLEMENTED (2026-09-02).** `manifests/rbac.yaml`: `cv-smoke-role` /
+`cv-deploy-role` promoted to `ClusterRole` (were byte-identical per namespace);
+SAs + RoleBindings stay namespaced for `cv-pipeline`. `tests/_resources/pipeline-rbac.yaml`
+is the Chainsaw `($namespace)`-templated copy the acceptance suites apply
+(one `apply:` step, no `sed`). `build-is-reproducible` (two namespaces) seeds
+RBAC with imperative `kubectl create serviceaccount` / `create rolebinding
+--clusterrole` — no stream editor, no spec duplication. New probe suite
+`tests/pipeline-rbac-templating/`. Migration wrinkle for an already-bootstrapped
+cluster (`roleRef` immutable on Role→ClusterRole) is in `docs/runbook.md` §Slice 5a.
+Verified green: `pipeline-rbac-templating`, `pipeline-rejects-bad-ref`,
+`cve-gate-blocks-fixable-critical`. The 3 heavy CNB-build suites need a full run
+on a healthy OrbStack (checkpoint: `orb restart` first).
 
 **Sequencing — three independently-green, bisect-safe commits:**
 

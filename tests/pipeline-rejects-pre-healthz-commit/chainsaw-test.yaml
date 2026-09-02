@@ -12,6 +12,10 @@ spec:
   steps:
     - name: run-with-the-pre-healthz-commit
       try:
+        # Per-stage pipeline RBAC, ($namespace)-templated. Replaces the retired
+        # in-script rewrite of manifests/rbac.yaml (`s/cv-pipeline/$NS/` piped to apply).
+        - apply:
+            file: ../_resources/pipeline-rbac.yaml
         - script:
             env:
               - name: NS
@@ -20,8 +24,6 @@ spec:
               set -eu
               cd "$(git rev-parse --show-toplevel)"
               . ./digests.env
-              sed "s/namespace: cv-pipeline/namespace: ${NS}/g" manifests/rbac.yaml \
-                | kubectl apply -n "$NS" -f - >/dev/null
               kubectl apply -n "$NS" -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
               kubectl -n "$NS" create -f - >/dev/null <<EOF
               apiVersion: tekton.dev/v1

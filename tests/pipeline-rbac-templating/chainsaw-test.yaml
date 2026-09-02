@@ -1,0 +1,78 @@
+# pipeline-rbac-templating — Slice 5a mechanism probe.
+#
+# The 4 pipeline-running suites once seeded their ephemeral namespace by
+# rewriting manifests/rbac.yaml's namespace with a stream editor, piped to
+# kubectl apply.
+# This asserts the replacement — a Chainsaw ($namespace)-templated apply of
+# tests/_resources/pipeline-rbac.yaml — lands the 5 namespaced RBAC objects
+# correctly, with the RoleBinding subjects pointed at THIS namespace's SAs and
+# the ClusterRoles (applied once by bootstrap) resolvable.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: pipeline-rbac-templating
+spec:
+  concurrent: false
+  steps:
+    - name: apply-the-templated-rbac
+      try:
+        - apply:
+            file: ../_resources/pipeline-rbac.yaml
+
+    - name: the-five-namespaced-objects-exist-here
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: cv-build-sa
+                namespace: ($namespace)
+              automountServiceAccountToken: false
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: cv-smoke-sa
+                namespace: ($namespace)
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: cv-deploy-sa
+                namespace: ($namespace)
+
+    - name: rolebindings-target-this-namespaces-serviceaccounts
+      try:
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: cv-smoke-rolebinding
+                namespace: ($namespace)
+              roleRef:
+                kind: ClusterRole
+                name: cv-smoke-role
+              (subjects[0].namespace == $namespace): true
+              (subjects[0].name == 'cv-smoke-sa'): true
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: cv-deploy-rolebinding
+                namespace: ($namespace)
+              roleRef:
+                kind: ClusterRole
+                name: cv-deploy-role
+              (subjects[0].namespace == $namespace): true
+              (subjects[0].name == 'cv-deploy-sa'): true
+
+    # Functional proof that cv-deploy-sa / cv-smoke-sa can act in this namespace
+    # comes free from pipeline-acceptance: its deploy + smoke tasks run as those
+    # SAs and would fail on any RBAC gap. cv-build-sa is bound to nothing (it
+    # makes no API calls); its automountServiceAccountToken:false above is the
+    # tell. This suite only proves the templated apply produces the right objects.

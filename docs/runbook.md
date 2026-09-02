@@ -173,3 +173,31 @@ gives the same answer, independent of when you run it.
   `sbom: none` in `io.buildpacks.build.metadata`). The `scan` step authors a
   CycloneDX SBOM with `trivy image --format cyclonedx` instead — scan-time
   provenance, not build-time. `docs/debt.md` carries the caveat.
+
+## Slice 5a
+
+### `kubectl apply -f manifests/rbac.yaml` fails: "cannot change roleRef"
+
+- **Symptom:** on an already-bootstrapped cluster, applying the Slice 5a
+  `manifests/rbac.yaml` errors on `cv-smoke-rolebinding` / `cv-deploy-rolebinding`
+  with `roleRef: Invalid value: ... cannot change roleRef`.
+- **Likely cause:** Slice 5a promoted `cv-smoke-role` / `cv-deploy-role` from
+  namespaced `Role` to `ClusterRole`; the existing RoleBindings still point at
+  `kind: Role`. `roleRef` is immutable — `apply` cannot patch it.
+- **Fix (one-time migration):**
+  ```
+  kubectl -n cv-pipeline delete rolebinding cv-smoke-rolebinding cv-deploy-rolebinding
+  kubectl apply -f manifests/rbac.yaml                       # recreates them -> ClusterRole
+  kubectl -n cv-pipeline delete role cv-smoke-role cv-deploy-role   # old namespaced Roles
+  ```
+  A fresh `bootstrap.sh` run on an empty cluster has no conflict.
+
+### A pipeline acceptance test fails at the first TaskRun with `serviceaccount ... not found`
+
+- **Likely cause:** the Chainsaw `apply` of `tests/_resources/pipeline-rbac.yaml`
+  did not run, or the shared ClusterRoles (`cv-smoke-role` / `cv-deploy-role`)
+  are not on the cluster (they come from `manifests/rbac.yaml` via
+  `bootstrap.sh` phase 3, not from the test).
+- **Check:** `kubectl get clusterrole cv-smoke-role cv-deploy-role`;
+  `kubectl -n <test-ns> get sa,rolebinding`.
+- **Fix:** re-run `bootstrap.sh` phase 3, or `kubectl apply -f manifests/rbac.yaml`.

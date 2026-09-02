@@ -5,6 +5,28 @@ triggers) — this is new work not yet scheduled into a slice.
 
 ## P2
 
+### Kyverno as a portfolio demo policy
+- **What:** a single small Kyverno policy as portfolio evidence of
+  admission-control knowledge — either one `validate` (e.g. `disallow-latest` /
+  require-digest on the `cv` Deployment) or a `generate` policy matched *only*
+  to ephemeral test namespaces. Vendored + digest-pinned like `cert-manager` /
+  `tekton-chains`.
+- **Why:** the original goal behind the (now superseded) decision `7e6275c3`
+  "Kyverno = core plane". Admission control is a real supply-chain skill worth
+  showing.
+- **Context:** eng review 2026-09-02 (`04eb7e62` supersedes `7e6275c3`). The
+  full "Kyverno owns per-namespace RBAC" slice was dropped: the digest policy
+  fires on nothing (deploy/smoke already build `@sha256` refs; 5c makes it
+  redundant), single-source generate moves `cv-pipeline`'s pipeline identity
+  behind an async background reconciler on a no-redundancy node,
+  `generateExisting` can't cleanly migrate live RBAC, and `bootstrap.sh` (frozen)
+  has no home for the install until `tofu/` lands in 5c. If Kyverno returns it
+  must be scoped so **production RBAC stays static YAML** — Kyverno never owns
+  `cv-pipeline`'s identity. Its own slice, its own rule-15 exit test.
+- **Effort:** M (vendored install + 1 policy + a Chainsaw test).
+- **Depends on:** P11a run (cosign-verify viability probe, Slice 5b); Slice 5c
+  shipped (`tofu/` provisioning path for the install).
+
 ### cv_packs — the decoupled buildpack suite
 - **What:** design doc + first commits for `github.com/InSuperposition/cv_packs`
   (empty repo, created 2026-09-01; local scaffold `../packs/`). A hand-authored,

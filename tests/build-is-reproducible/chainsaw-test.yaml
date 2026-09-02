@@ -33,8 +33,20 @@ spec:
                 pod-security.kubernetes.io/enforce=restricted \
                 pod-security.kubernetes.io/enforce-version=latest >/dev/null
               for ns in "$NS1" "$NS2"; do
-                sed "s/namespace: cv-pipeline/namespace: ${ns}/g" manifests/rbac.yaml \
-                  | kubectl apply -n "$ns" -f - >/dev/null
+                # Per-stage pipeline RBAC. This test spans two namespaces (one
+                # Chainsaw-managed, one script-created), so it seeds RBAC with
+                # imperative `kubectl create` rather than the ($namespace)-
+                # templated apply the single-namespace suites use — no stream
+                # editor, no rbac spec duplication, uses the shared ClusterRoles.
+                kubectl -n "$ns" create serviceaccount cv-build-sa >/dev/null
+                kubectl -n "$ns" patch serviceaccount cv-build-sa \
+                  -p '{"automountServiceAccountToken":false}' >/dev/null
+                kubectl -n "$ns" create serviceaccount cv-smoke-sa >/dev/null
+                kubectl -n "$ns" create serviceaccount cv-deploy-sa >/dev/null
+                kubectl -n "$ns" create rolebinding cv-smoke-rolebinding \
+                  --clusterrole cv-smoke-role --serviceaccount "${ns}:cv-smoke-sa" >/dev/null
+                kubectl -n "$ns" create rolebinding cv-deploy-rolebinding \
+                  --clusterrole cv-deploy-role --serviceaccount "${ns}:cv-deploy-sa" >/dev/null
                 kubectl apply -n "$ns" -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
                 kubectl -n "$ns" create -f - >/dev/null <<EOF
               apiVersion: tekton.dev/v1

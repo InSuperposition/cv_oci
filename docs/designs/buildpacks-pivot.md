@@ -991,30 +991,36 @@ question was settled by the OrbStack service-DNS finding.
    no hard-coded image refs outside `digests.cue`.
 2. **Application tests** (`cv_frontend`): unit, integration, server startup;
    `npm ci` + `npm audit signatures`.
-3. **Script unit tests** (bats): `digests.cue` / `gen-digests` idempotence;
-   `validate.sh` fixture pass/fail.
-4. **Build-output test** (`e2e.sh`): `APP_IMAGE_DIGEST` is `sha256:<64hex>`; the
-   image is in zot; the launch layer carries the `optionalDependencies` arm64
-   binaries (gate-zero assertion — keep it).
-5. **Build reproducibility** (`repro.sh`, Slice 2): two independent builds of one
-   SHA → identical app-layer + SBOM-layer content hash + identical outer digest.
-6. **Deploy-by-digest test** (`e2e.sh`): the `cv` Deployment image is
-   `<zot>/cv@sha256:<digest>`; `imagePullPolicy` set; the pod `imageID` carries
-   the digest; `/healthz` → 200; `cv-deploy-state` records digest + app-sha +
-   PipelineRun. (Slice 5 moves the deploy path to Flux — the assertions follow.)
-7. **Negative pipeline test** (`negative.sh`): bad ref → `fetch` fails, nothing
+3. **Script unit tests** (bats, `scripts/test/*.bats`): `digests.cue` /
+   `gen-digests` idempotence; `validate.sh` fixture pass/fail; the `report.toml`
+   awk parser guard. A research task replaces these where a cue-native or
+   `tofu test` approach fits, after OpenTofu lands (TODOS.md).
+4. **Build-output + deploy-by-digest** (`tests/pipeline-acceptance`, Chainsaw):
+   the pipeline succeeds; `app-image-digest` is `sha256:<64hex>`; the image is in
+   zot; the `cv` Deployment runs `<zot>/<ns>@sha256:<digest>` with
+   `IfNotPresent`, 1/1 ready; the Pod `imageID` carries the digest; `/healthz` →
+   200; `cv-deploy-state` records digest + app-sha + PipelineRun; no smoke leak.
+   (Slice 5c moves the deploy path to Flux — the assertions follow.)
+5. **Build reproducibility** (`tests/build-is-reproducible`, Slice 2): two
+   independent builds of one SHA → identical app-layer + SBOM-layer content hash
+   (+ identical outer digest, non-load-bearing).
+6. **Negative pipeline tests** (`tests/pipeline-rejects-bad-ref`,
+   `tests/pipeline-rejects-pre-healthz-commit`): bad ref → `fetch` fails, nothing
    downstream; pre-`/healthz` SHA → `build` ok, `smoke` fails, `deploy` skipped,
    teardown runs, nothing deployed.
-8. **SBOM-presence test** (Slice 3): the `sbom.sha` layer is present, parses as
-   CycloneDX + SPDX, names the production deps + the Node runtime.
-9. **Reproducible-CVE-verdict test** (Slice 3): a known-fixable-CVE fixture fails
-   the gate readably; a clean image passes; re-running at the pinned DB digest
-   gives the identical verdict; the `(image, DB) → verdict` record is written.
-10. **Signature test** (Slice 4): `cosign verify` passes; a tampered image fails.
-11. **Reproducible-provenance test** (Slice 4, `repro.sh` extension): two builds
-    of one SHA → identical provenance predicate digest (or the P8 fallback gap is
-    documented); predicate names the expected pipeline + tasks + pinned inputs +
-    `cv_frontend` SHA.
+7. **CVE-gate test** (`tests/cve-gate-blocks-fixable-critical`, Slice 3): the
+   scan-step policy string still matches `pipeline.yaml`; the policy run against
+   the frozen fixture SBOM (lodash@4.17.4, CVE-2019-10744) at the pinned DB
+   digest exits non-zero — a permanently reproducible FAIL.
+8. **SBOM shape** (Slice 3, in `tests/pipeline-acceptance`): the pipeline's
+   `cve-verdict` result is `pass` against the pinned trivy-db digest; the
+   CycloneDX SBOM has ≥ 20 components.
+10. **Signature + referrers test** (Slice 4, in `tests/pipeline-acceptance`):
+    Chains signs the build TaskRun; `cosign verify` + `verify-attestation` pass;
+    the provenance names the builder as a material; SBOM + verdict + bundle
+    referrers are present; a byte-mutated copy FAILS `cosign verify`.
+11. **Reproducible-provenance** (Slice 4): the P8 fallback — assert `subject` +
+    the sorted materials-digest set, not the predicate digest (T6-followup).
 12. **Slice 5 suite** (Chainsaw): `timoni build cv-frontend` twice → identical
     bytes (P13); the rendered `cv-frontend` Deployment/Service is field-equivalent
     to today's inline `cv` Deployment (regression); the pushed

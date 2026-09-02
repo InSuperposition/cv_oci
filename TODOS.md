@@ -25,10 +25,10 @@ triggers) — this is new work not yet scheduled into a slice.
 - **Depends on:** the cv_oci CNB curriculum being further along; never blocks it.
 
 ### Reproducibility CronJob
-- **What:** a Tekton `CronJob` (or scheduled PipelineRun) that reruns
-  `scripts/test/repro.sh`'s two-build comparison weekly against the pinned
+- **What:** a Tekton `CronJob` (or scheduled PipelineRun) that reruns the
+  `tests/build-is-reproducible` two-build comparison weekly against the pinned
   fixture SHA and fails loudly on app-layer / SBOM-layer content-hash drift.
-- **Why:** `repro.sh` proves reproducibility at a point in time; the CronJob
+- **Why:** the test proves reproducibility at a point in time; the CronJob
   catches a regression from a builder/lifecycle bump between slices.
 - **Context:** Slice 2 (`docs/designs/buildpacks-pivot.md`). The executable
   test landed; the CronJob is deferred for the same reason as the portability
@@ -37,6 +37,21 @@ triggers) — this is new work not yet scheduled into a slice.
   between sessions.
 - **Effort:** S.
 - **Depends on:** a persistent cluster (same gate as portability CI).
+
+### Replace bats unit tests where a declarative tool fits
+- **What:** re-home `scripts/test/*.bats` (`gen-digests` idempotence + schema,
+  `validate.sh` fixture pass/fail, the `report.toml` awk parser guard) onto a
+  declarative tool where one fits — `cue` native tests for the digest schema,
+  `tofu test` (`.tftest.hcl`) for anything that moves into `cv_oci/tofu/`,
+  Chainsaw `script:` leaves only as a last resort.
+- **Why:** the Slice 5a mandate retired the bash acceptance harness for
+  Chainsaw; bats is the remaining hand-rolled test runner. These are host-tool
+  unit tests, not Kubernetes e2e, so Chainsaw is a poor fit — wait until
+  OpenTofu (Slice 5c) is in the repo so `tofu test` is on the table.
+- **Context:** Slice 5a eng review. Not blocking — bats stays green in the
+  meantime; pre-commit keeps running it.
+- **Effort:** S.
+- **Depends on:** Slice 5c (`cv_oci/tofu/` exists).
 
 ### Portability CI check (kind / k3d)
 - **What:** scheduled run of `bootstrap.sh` + the Slice 1 pipeline on a vanilla

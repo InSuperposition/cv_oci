@@ -35,12 +35,13 @@ LOCAL_LOC="schemas/{{ .Group }}/{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.js
 if [ "$#" -gt 0 ]; then
 	files=("$@")
 else
-	# Our own tracked manifests only. Excludes: vendored schemas + upstream
-	# manifests, negative-test fixtures and generated
-	# non-manifest YAML.
+	# Our own tracked K8s/Tekton manifests only. Excludes: vendored schemas +
+	# upstream manifests, negative-test fixtures, generated non-manifest YAML,
+	# and the Chainsaw acceptance suite under tests/ (chainsaw.kyverno.io CRDs,
+	# not K8s manifests — `chainsaw lint` validates those; see .githooks/pre-commit).
 	mapfile -t files < <(
 		git ls-files -- '*.yaml' '*.yml' \
-		| grep -Ev '^(schemas/|vendor/|scripts/test/fixtures/|params\.yaml$)' \
+		| grep -Ev '^(schemas/|vendor/|scripts/test/fixtures/|tests/|params\.yaml$)' \
 		| grep -Ev '(^|/)[a-z0-9-]+-patch\.yaml$' || true
 	)
 fi

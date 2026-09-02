@@ -1,0 +1,93 @@
+# pipeline-rejects-bad-ref — negative scenario 1 (was scripts/test/negative.sh).
+#
+# A PipelineRun with a git ref that does not exist must fail at `fetch`, and
+# nothing downstream may run.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: pipeline-rejects-bad-ref
+spec:
+  concurrent: false
+  steps:
+    - name: run-with-a-bogus-ref
+      try:
+        - script:
+            env:
+              - name: NS
+                value: ($namespace)
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env
+              sed "s/namespace: cv-pipeline/namespace: ${NS}/g" manifests/rbac.yaml \
+                | kubectl apply -n "$NS" -f - >/dev/null
+              kubectl apply -n "$NS" -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
+              kubectl -n "$NS" create -f - >/dev/null <<EOF
+              apiVersion: tekton.dev/v1
+              kind: PipelineRun
+              metadata:
+                generateName: bad-ref-
+                labels: { cv-oci/acceptance-test: pipeline-rejects-bad-ref }
+              spec:
+                pipelineRef: { name: cv-build }
+                taskRunTemplate:
+                  serviceAccountName: cv-build-sa
+                  podTemplate:
+                    securityContext: { fsGroup: 1000 }
+                    nodeSelector: { kubernetes.io/arch: arm64 }
+                taskRunSpecs:
+                  - { pipelineTaskName: smoke, serviceAccountName: cv-smoke-sa }
+                  - { pipelineTaskName: smoke-teardown, serviceAccountName: cv-smoke-sa }
+                  - { pipelineTaskName: deploy, serviceAccountName: cv-deploy-sa }
+                params:
+                  - { name: builder-image, value: "docker.io/heroku/builder:24@${CNBBUILDER}" }
+                  - { name: run-image, value: "docker.io/heroku/heroku:24@${CNBRUNIMAGE}" }
+                  - { name: utility-image, value: "docker.io/library/bash@${CNBUTILITYIMAGE}" }
+                  - { name: kubectl-image, value: "docker.io/alpine/k8s:1.31.1@${CNBKUBECTLIMAGE}" }
+                  - { name: git-image, value: "docker.io/alpine/git@${CNBGITIMAGE}" }
+                  - { name: trivy-image, value: "ghcr.io/aquasecurity/trivy@${TRIVYCLI}" }
+                  - { name: oras-image, value: "ghcr.io/oras-project/oras@${ORASCLI}" }
+                  - { name: trivy-db, value: "${TRIVYDB}" }
+                  - { name: frontend-repo, value: "${FRONTEND_REPO}" }
+                  - { name: frontend-ref, value: "no-such-branch-xyz-${NS}" }
+                  - { name: app-repo, value: "${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/${NS}" }
+                  - { name: namespace, value: "${NS}" }
+                workspaces:
+                  - name: shared
+                    volumeClaimTemplate:
+                      spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 3Gi } } }
+                timeouts: { pipeline: 20m }
+              EOF
+
+    - name: pipeline-fails
+      try:
+        - assert:
+            timeout: 20m
+            resource:
+              apiVersion: tekton.dev/v1
+              kind: PipelineRun
+              metadata:
+                labels:
+                  cv-oci/acceptance-test: pipeline-rejects-bad-ref
+              status:
+                (conditions[?type == 'Succeeded']):
+                  - status: 'False'
+
+    - name: fetch-did-not-succeed-and-nothing-downstream-ran
+      try:
+        - script:
+            env:
+              - name: NS
+                value: ($namespace)
+            content: |
+              set -eu
+              reason=$(kubectl -n "$NS" get taskrun -l tekton.dev/pipelineTask=fetch \
+                -o jsonpath='{.items[0].status.conditions[0].reason}')
+              [ -n "$reason" ] && [ "$reason" != "Succeeded" ] || { echo "fetch reason=$reason" >&2; exit 1; }
+        - error:
+            resource:
+              apiVersion: tekton.dev/v1
+              kind: TaskRun
+              metadata:
+                labels:
+                  tekton.dev/pipelineTask: build

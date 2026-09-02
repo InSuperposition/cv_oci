@@ -1,0 +1,122 @@
+# build-is-reproducible — Slice 2 reproducibility (was scripts/test/repro.sh).
+#
+# Build the pinned cv_frontend fixture SHA twice, independently — separate
+# ephemeral namespaces, separate zot repos, no shared cache — and assert the
+# CNB lifecycle's own content-addressed layer hashes agree:
+#   - app-layer diffID   io.buildpacks.lifecycle.metadata .app[0].sha
+#   - SBOM-layer diffID  io.buildpacks.lifecycle.metadata .sbom.sha
+# Bonus (not load-bearing): the two outer image digests also match.
+#
+# One test, two PipelineRuns. The second namespace is created by this test's
+# setup step (Chainsaw allocates one ephemeral namespace per test).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: build-is-reproducible
+spec:
+  concurrent: false
+  steps:
+    - name: start-two-independent-builds
+      try:
+        - script:
+            env:
+              - name: NS1
+                value: ($namespace)
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              NS2="${NS1}-b"
+              kubectl create ns "$NS2" >/dev/null
+              kubectl label ns "$NS2" \
+                pod-security.kubernetes.io/enforce=restricted \
+                pod-security.kubernetes.io/enforce-version=latest >/dev/null
+              for ns in "$NS1" "$NS2"; do
+                sed "s/namespace: cv-pipeline/namespace: ${ns}/g" manifests/rbac.yaml \
+                  | kubectl apply -n "$ns" -f - >/dev/null
+                kubectl apply -n "$ns" -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
+                kubectl -n "$ns" create -f - >/dev/null <<EOF
+              apiVersion: tekton.dev/v1
+              kind: PipelineRun
+              metadata:
+                generateName: repro-
+                labels: { cv-oci/acceptance-test: build-is-reproducible }
+              spec:
+                pipelineRef: { name: cv-build }
+                taskRunTemplate:
+                  serviceAccountName: cv-build-sa
+                  podTemplate:
+                    securityContext: { fsGroup: 1000 }
+                    nodeSelector: { kubernetes.io/arch: arm64 }
+                taskRunSpecs:
+                  - { pipelineTaskName: smoke, serviceAccountName: cv-smoke-sa }
+                  - { pipelineTaskName: smoke-teardown, serviceAccountName: cv-smoke-sa }
+                  - { pipelineTaskName: deploy, serviceAccountName: cv-deploy-sa }
+                params:
+                  - { name: builder-image, value: "docker.io/heroku/builder:24@${CNBBUILDER}" }
+                  - { name: run-image, value: "docker.io/heroku/heroku:24@${CNBRUNIMAGE}" }
+                  - { name: utility-image, value: "docker.io/library/bash@${CNBUTILITYIMAGE}" }
+                  - { name: kubectl-image, value: "docker.io/alpine/k8s:1.31.1@${CNBKUBECTLIMAGE}" }
+                  - { name: git-image, value: "docker.io/alpine/git@${CNBGITIMAGE}" }
+                  - { name: trivy-image, value: "ghcr.io/aquasecurity/trivy@${TRIVYCLI}" }
+                  - { name: oras-image, value: "ghcr.io/oras-project/oras@${ORASCLI}" }
+                  - { name: trivy-db, value: "${TRIVYDB}" }
+                  - { name: frontend-repo, value: "${FRONTEND_REPO}" }
+                  - { name: frontend-ref, value: "${FRONTEND_FIXTURE_SHA}" }
+                  - { name: app-repo, value: "${zot}/${ns}" }
+                  - { name: namespace, value: "${ns}" }
+                workspaces:
+                  - name: shared
+                    volumeClaimTemplate:
+                      spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 3Gi } } }
+                timeouts: { pipeline: 25m }
+              EOF
+              done
+
+    - name: both-builds-succeed-and-layer-hashes-agree
+      try:
+        - script:
+            env:
+              - name: NS1
+                value: ($namespace)
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              NS2="${NS1}-b"
+              trap 'kubectl delete ns "$NS2" --wait=false >/dev/null 2>&1 || true' EXIT
+
+              # wait_ok <ns>  — block until the build PipelineRun in <ns> succeeds
+              wait_ok() {
+                deadline=$(( $(date +%s) + 1500 ))
+                while :; do
+                  s=$(kubectl -n "$1" get pipelinerun -l cv-oci/acceptance-test=build-is-reproducible \
+                    -o jsonpath='{.items[0].status.conditions[0].status}' 2>/dev/null || true)
+                  [ "$s" = "True" ] && return 0
+                  [ "$s" = "False" ] && { echo "$1 build failed" >&2; return 1; }
+                  [ "$(date +%s)" -ge "$deadline" ] && { echo "$1 timed out" >&2; return 1; }
+                  sleep 10
+                done
+              }
+              wait_ok "$NS1"
+              wait_ok "$NS2"
+
+              # app_sha / sbom_sha / outer_digest <ns>  — the lifecycle's own content hashes
+              app_sha()  { crane config --insecure "$1" | jq -r '.config.Labels["io.buildpacks.lifecycle.metadata"] | fromjson | .app[0].sha'; }
+              sbom_sha() { crane config --insecure "$1" | jq -r '.config.Labels["io.buildpacks.lifecycle.metadata"] | fromjson | .sbom.sha'; }
+              img_of() {
+                d=$(kubectl -n "$1" get pipelinerun -l cv-oci/acceptance-test=build-is-reproducible \
+                  -o jsonpath='{.items[0].status.results[?(@.name=="app-image-digest")].value}')
+                printf '%s' "${zot}/$1@${d}"
+              }
+              ref1=$(img_of "$NS1"); ref2=$(img_of "$NS2")
+              app1=$(app_sha "$ref1");  app2=$(app_sha "$ref2")
+              sbom1=$(sbom_sha "$ref1"); sbom2=$(sbom_sha "$ref2")
+              echo "app:  $app1 / $app2"
+              echo "sbom: $sbom1 / $sbom2"
+              echo "refs: $ref1 / $ref2"
+              [ "$app1" = "$app2" ]   || { echo "app-layer content hash differs" >&2; exit 1; }
+              [ "$sbom1" = "$sbom2" ] || { echo "SBOM-layer content hash differs" >&2; exit 1; }
+              [ "${ref1##*@}" = "${ref2##*@}" ] || echo "NOTE: outer digest differs (bonus check, non-fatal)"

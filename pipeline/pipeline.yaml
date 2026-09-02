@@ -148,7 +148,7 @@ spec:
               WS="$(workspaces.source.path)"
               CACHE="$WS/.trivycache"
               DB_REF="ghcr.io/aquasecurity/trivy-db@$(params.trivy-db)"
-              # CVE policy — keep in sync with scripts/test/negative.sh (grep guard).
+              # CVE policy — keep in sync with tests/cve-gate-blocks-fixable-critical/ (grep guard).
               POLICY="--severity CRITICAL --ignore-unfixed --exit-code 1"
               export TRIVY_CACHE_DIR="$CACHE"
               mkdir -p "$CACHE"

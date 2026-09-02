@@ -10,15 +10,16 @@ tests need. Pin these; a version bump is a reviewed commit (Rule 12).
 | `cue` | v0.17.1 | `digests.cue` schema + `cue export` to `digests.env` / `params.yaml` | `brew install cue` / [releases](https://github.com/cue-lang/cue/releases) |
 | `kubeconform` | v0.8.0 | offline Tekton/K8s YAML validation (`scripts/validate.sh`) | `brew install kubeconform` / [releases](https://github.com/yannh/kubeconform/releases) |
 | `kubectl` | v1.37.0 (client) | apply, `rollout status` | matches the OrbStack cluster minor |
-| `tkn` | 0.46.0 | `tkn pipelinerun logs` in the e2e tests | `brew install tektoncd-cli` |
-| `crane` | 0.22.0 | `crane digest` when pinning images; the e2e "image is really in zot" check | `brew install crane` |
+| `chainsaw` | 0.2.15 | the acceptance suite under `tests/` (`chainsaw test tests/`). **Kyverno Chainsaw** — a declarative K8s e2e tool; NOT the WithSecureLabs forensics tool of the same name that `brew install chainsaw` installs. | `brew install kyverno/chainsaw/chainsaw` / `go install github.com/kyverno/chainsaw@v0.2.15` |
+| `tkn` | 0.46.0 | `tkn pipelinerun logs` in the acceptance suite's `catch` blocks | `brew install tektoncd-cli` |
+| `crane` | 0.22.0 | `crane digest` / `crane config` / `crane mutate` when pinning images and in the acceptance suite (image-in-zot, tamper, repro layer hashes) | `brew install crane` |
 | `shellcheck` | 0.11.0 | pre-commit lint of `scripts/` | `brew install shellcheck` |
-| `bats` | 1.14.0 | `scripts/test/*.bats` | `brew install bats-core` |
-| `jq` | 1.8.2 | JSONL task artifacts, scripting | `brew install jq` |
+| `bats` | 1.14.0 | `scripts/test/*.bats` (unit: `cue vet`, gen-digests idempotence, validate fixtures, the awk parser guard) — a research task tracks replacing these after OpenTofu lands (TODOS.md) | `brew install bats-core` |
+| `jq` | 1.8.2 | JSONL task artifacts, the acceptance suite | `brew install jq` |
 | `git` | 2.55.0 | everything | system |
-| `trivy` | 0.74.0 | `scripts/test/negative.sh` CVE-gate scenario (`trivy sbom` against the frozen fixture). The pipeline `scan` step runs the pinned `trivy` **image** (`digests.cue` `trivyCli`), not this host binary. | `brew install trivy` / [releases](https://github.com/aquasecurity/trivy/releases) |
-| `cosign` | 3.1.3 | `bootstrap.sh` phase 5 generates the Chains signing key (`cosign generate-key-pair k8s://…`, only-if-absent); `scripts/test/e2e.sh` `cosign verify` / `verify-attestation` (Slice 4). | `brew install cosign` |
-| `oras` | 1.2.3 | `scripts/test/e2e.sh` `oras discover` (Slice 4 referrers). | `brew install oras` / [releases](https://github.com/oras-project/oras/releases) |
+| `trivy` | 0.74.0 | the `tests/cve-gate-blocks-fixable-critical` acceptance test (`trivy sbom` against the frozen fixture). The pipeline `scan` step runs the pinned `trivy` **image** (`digests.cue` `trivyCli`), not this host binary. | `brew install trivy` / [releases](https://github.com/aquasecurity/trivy/releases) |
+| `cosign` | 3.1.3 | `bootstrap.sh` phase 5 generates the Chains signing key (`cosign generate-key-pair k8s://…`, only-if-absent); `tests/pipeline-acceptance` `cosign verify` / `verify-attestation` (Slice 4). | `brew install cosign` |
+| `oras` | 1.2.3 | `tests/pipeline-acceptance` `oras discover` (Slice 4 referrers). | `brew install oras` / [releases](https://github.com/oras-project/oras/releases) |
 
 ## In-cluster CRD schemas for `scripts/validate.sh`
 

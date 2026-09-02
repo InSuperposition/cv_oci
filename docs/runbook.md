@@ -65,27 +65,31 @@ Gotchas found while wiring this:
 
 ## The pipeline
 
-### `scripts/test/e2e.sh`, `negative.sh` or `repro.sh` fails
+### A `chainsaw test tests/` acceptance test fails
 
-- **`repro.sh`:** builds the pinned fixture SHA twice (namespaces
-  `cv-repro-<uid>-1` / `-2`) and asserts the two builds' app-layer and
-  SBOM-layer content hashes agree. A FAIL on the app-layer check means
-  something this-run-specific leaked into `/workspace/source` — check the
-  `fetch` step still does `rm -rf .git` (the historical culprit; `docs/debt.md`
-  Resolved). `repro.sh --keep` leaves both namespaces + `_artifacts`.
-- **Check:** `e2e.sh --keep` leaves the `cv-cnb-e2e-<uid>` namespace, the
-  run-scoped zot repo, and the evidence in `scripts/test/_artifacts/<ns>/`
-  (pipelinerun.yaml, taskruns.yaml, events.txt, pipeline.log, deployed.yaml).
-  Read `pipeline.log` first.
+The suite lives in `tests/` (Kyverno Chainsaw, not the forensics tool of the
+same name — see `docs/bootstrap-toolchain.md`). Each test runs the real
+`cv-build` Pipeline in its own ephemeral PSA-`restricted` namespace.
+
+- **Run one test:** `chainsaw test tests/pipeline-acceptance --config tests/.chainsaw.yaml`.
+- **Keep the namespace on failure:** `chainsaw test tests/... --skip-delete`.
+  Then read the failing PipelineRun: `tkn -n <ns> pipelinerun logs -l
+  cv-oci/acceptance-test=<test-name> --all`. Each test's `catch` block already
+  dumps this on failure.
+- **`build-is-reproducible`** builds the fixture SHA twice (the test's own
+  namespace + a sibling `<ns>-b`) and asserts the two builds' app-layer and
+  SBOM-layer content hashes agree. A FAIL on the app-layer check means something
+  run-specific leaked into `/workspace/source` — check `fetch` still does
+  `rm -rf .git` (`docs/debt.md` Resolved).
 - **Common causes:** the OrbStack node-trust steps above are not done (the `cv`
   pod `ErrImagePull`s or gets `http: server gave HTTP response to HTTPS
-  client`); cluster DNS blip in a Task pod (`fetch` clones shallow — retry the
-  run); Service-endpoint lag (smoke/deploy retry `/healthz` 10x — a persistent
-  failure means the image genuinely doesn't serve); zot PVC full.
-- **Cleanup after `--keep`:** `kubectl delete ns cv-cnb-e2e-<uid>`;
-  `crane delete --insecure zot.cv-pipeline.svc.cluster.local:5000/cv-e2e-<uid>:git-<sha>`
-  (the zot image has no shell — `kubectl exec -- rm` does not work);
-  `rm -rf scripts/test/_artifacts`.
+  client`); cluster DNS blip in a Task pod (retry the run); Service-endpoint lag
+  (smoke/deploy retry `/healthz` 10x — a persistent failure means the image
+  genuinely doesn't serve); zot PVC full; Chains signing not finished
+  (`pipeline-acceptance` waits up to 5m for `chains.tekton.dev/signed=true`).
+- **Cleanup after `--skip-delete`:** `kubectl delete ns <ns> <ns>-b`;
+  `crane delete --insecure zot.cv-pipeline.svc.cluster.local:5000/<ns>:git-<sha>`
+  (the zot image has no shell — `kubectl exec -- rm` does not work).
 
 ### A PipelineRun is stuck / a stale `cv` Deployment is running
 
@@ -115,11 +119,11 @@ Gotchas found while wiring this:
 ### CNB build: two runs of one SHA give different image digests
 
 - Since Slice 2 the build **is** byte-reproducible — two runs of one fixture
-  SHA produce the identical outer image digest (`scripts/test/repro.sh`
+  SHA produce the identical outer image digest (`tests/build-is-reproducible`
   asserts it). If they diverge, the usual cause is the `fetch` step leaving
   `.git/` in the tree (its `rm -rf .git` regressed): `.git/index` and
   `.git/logs/HEAD` carry wall-clock data the buildpack copies into the app
-  layer. `repro.sh` also checks the per-CNB-layer content hashes from the
+  layer. The test also checks the per-CNB-layer content hashes from the
   `io.buildpacks.lifecycle.metadata` label, which localise the drift.
 
 ### Inspecting the CVE verdict + SBOM of a build (Slice 3)

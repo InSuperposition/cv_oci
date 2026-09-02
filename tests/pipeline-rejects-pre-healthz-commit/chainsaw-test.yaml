@@ -1,0 +1,113 @@
+# pipeline-rejects-pre-healthz-commit — negative scenario 2 (was negative.sh).
+#
+# cv_frontend commit 0bbc684 ("Initial commit") builds fine but has no /healthz
+# route, so `smoke` must fail its GET /healthz, `deploy` must be skipped, the
+# `finally` smoke-teardown must still run, and nothing may reach a `cv` Deployment.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: pipeline-rejects-pre-healthz-commit
+spec:
+  concurrent: false
+  steps:
+    - name: run-with-the-pre-healthz-commit
+      try:
+        - script:
+            env:
+              - name: NS
+                value: ($namespace)
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env
+              sed "s/namespace: cv-pipeline/namespace: ${NS}/g" manifests/rbac.yaml \
+                | kubectl apply -n "$NS" -f - >/dev/null
+              kubectl apply -n "$NS" -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
+              kubectl -n "$NS" create -f - >/dev/null <<EOF
+              apiVersion: tekton.dev/v1
+              kind: PipelineRun
+              metadata:
+                generateName: pre-healthz-
+                labels: { cv-oci/acceptance-test: pipeline-rejects-pre-healthz-commit }
+              spec:
+                pipelineRef: { name: cv-build }
+                taskRunTemplate:
+                  serviceAccountName: cv-build-sa
+                  podTemplate:
+                    securityContext: { fsGroup: 1000 }
+                    nodeSelector: { kubernetes.io/arch: arm64 }
+                taskRunSpecs:
+                  - { pipelineTaskName: smoke, serviceAccountName: cv-smoke-sa }
+                  - { pipelineTaskName: smoke-teardown, serviceAccountName: cv-smoke-sa }
+                  - { pipelineTaskName: deploy, serviceAccountName: cv-deploy-sa }
+                params:
+                  - { name: builder-image, value: "docker.io/heroku/builder:24@${CNBBUILDER}" }
+                  - { name: run-image, value: "docker.io/heroku/heroku:24@${CNBRUNIMAGE}" }
+                  - { name: utility-image, value: "docker.io/library/bash@${CNBUTILITYIMAGE}" }
+                  - { name: kubectl-image, value: "docker.io/alpine/k8s:1.31.1@${CNBKUBECTLIMAGE}" }
+                  - { name: git-image, value: "docker.io/alpine/git@${CNBGITIMAGE}" }
+                  - { name: trivy-image, value: "ghcr.io/aquasecurity/trivy@${TRIVYCLI}" }
+                  - { name: oras-image, value: "ghcr.io/oras-project/oras@${ORASCLI}" }
+                  - { name: trivy-db, value: "${TRIVYDB}" }
+                  - { name: frontend-repo, value: "${FRONTEND_REPO}" }
+                  - { name: frontend-ref, value: "0bbc68418ce92048a85b8b18afe1dcfe6204bb83" }
+                  - { name: app-repo, value: "${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/${NS}" }
+                  - { name: namespace, value: "${NS}" }
+                workspaces:
+                  - name: shared
+                    volumeClaimTemplate:
+                      spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 3Gi } } }
+                timeouts: { pipeline: 25m }
+              EOF
+
+    - name: pipeline-fails
+      try:
+        - assert:
+            timeout: 25m
+            resource:
+              apiVersion: tekton.dev/v1
+              kind: PipelineRun
+              metadata:
+                labels:
+                  cv-oci/acceptance-test: pipeline-rejects-pre-healthz-commit
+              status:
+                (conditions[?type == 'Succeeded']):
+                  - status: 'False'
+
+    - name: build-passed-smoke-failed-deploy-skipped-teardown-ran
+      try:
+        - script:
+            env:
+              - name: NS
+                value: ($namespace)
+            content: |
+              set -eu
+              st() { kubectl -n "$NS" get taskrun -l "tekton.dev/pipelineTask=$1" \
+                -o jsonpath='{.items[0].status.conditions[0].reason}' 2>/dev/null || true; }
+              [ "$(st build)" = "Succeeded" ] || { echo "build=$(st build)" >&2; exit 1; }
+              s=$(st smoke); [ -n "$s" ] && [ "$s" != "Succeeded" ] || { echo "smoke=$s" >&2; exit 1; }
+              [ "$(st smoke-teardown)" = "Succeeded" ] || { echo "teardown=$(st smoke-teardown)" >&2; exit 1; }
+        - error:
+            resource:
+              apiVersion: tekton.dev/v1
+              kind: TaskRun
+              metadata:
+                labels:
+                  tekton.dev/pipelineTask: deploy
+
+    - name: nothing-deployed-no-smoke-leak
+      try:
+        - error:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: cv
+        - script:
+            env:
+              - name: NS
+                value: ($namespace)
+            content: |
+              set -eu
+              n=$(kubectl -n "$NS" get deploy,svc -l cv-oci/smoke -o name | wc -l | tr -d ' ')
+              [ "$n" = "0" ]

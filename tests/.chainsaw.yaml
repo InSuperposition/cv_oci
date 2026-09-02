@@ -1,0 +1,45 @@
+# Chainsaw configuration for the cv_oci acceptance suite.
+#
+# Replaces the retired bash harness (scripts/test/{e2e,negative,repro}.sh) —
+# Slice 5a, docs/designs/buildpacks-pivot.md. Each test runs the real cv-build
+# Pipeline against the live cluster in its own ephemeral namespace, labelled to
+# match cv-pipeline's PodSecurity level so `restricted` is genuinely exercised.
+#
+#   chainsaw test tests/
+#   chainsaw test tests/ --test-dir tests/pipeline-acceptance   # one test
+#
+# Needs: kubectl, tkn, crane, jq, cosign, oras on PATH (docs/bootstrap-toolchain.md),
+# and a bootstrapped cluster (bootstrap/bootstrap.sh + the OrbStack node-trust
+# steps in docs/runbook.md).
+apiVersion: chainsaw.kyverno.io/v1alpha2
+kind: Configuration
+metadata:
+  name: cv-oci-acceptance
+spec:
+  # A full CNB build + scan + smoke + deploy takes 12-20 min; Chains then signs
+  # asynchronously. These are ceilings, not expected durations.
+  timeouts:
+    apply: 2m
+    assert: 25m
+    cleanup: 3m
+    delete: 2m
+    error: 2m
+    exec: 25m
+  execution:
+    # Single-node OrbStack cluster — running heavy pipeline builds in parallel
+    # starves the node. One test at a time.
+    parallel: 1
+    failFast: false
+  cleanup:
+    # Namespace teardown is slow and not worth blocking on; the next run uses a
+    # fresh ephemeral namespace regardless.
+    skipDelete: false
+  namespace:
+    template:
+      metadata:
+        labels:
+          # Slice 1.7 — the pipeline pods must satisfy PodSecurity `restricted`,
+          # same as cv-pipeline. Without this the ephemeral test namespace would
+          # be unrestricted and the run would not prove the securityContext work.
+          pod-security.kubernetes.io/enforce: restricted
+          pod-security.kubernetes.io/enforce-version: latest

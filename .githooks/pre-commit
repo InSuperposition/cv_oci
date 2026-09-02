@@ -6,7 +6,8 @@
 #   2. gen-digests drift check (digests.env / params.yaml match digests.cue)
 #   3. cue vet digests.cue
 #   4. kubeconform validation of manifests
-#   5. bats unit tests
+#   5. chainsaw lint on the acceptance suite (offline schema check)
+#   6. bats unit tests
 #
 # Bypass in a genuine emergency with `git commit --no-verify`, then fix it in
 # the next commit (docs/runbook.md).
@@ -47,6 +48,16 @@ fi
 
 step "validate.sh"
 scripts/validate.sh || fail=1
+
+if command -v chainsaw >/dev/null 2>&1; then
+	step "chainsaw lint (acceptance suite)"
+	chainsaw lint configuration -f tests/.chainsaw.yaml >/dev/null || fail=1
+	for t in tests/*/chainsaw-test.yaml; do
+		chainsaw lint test -f "$t" >/dev/null || { echo "  invalid: $t"; fail=1; }
+	done
+else
+	echo "  chainsaw not installed — skipping (docs/bootstrap-toolchain.md; Kyverno Chainsaw, not the forensics tool of the same name)"
+fi
 
 if command -v bats >/dev/null 2>&1; then
 	step "bats"

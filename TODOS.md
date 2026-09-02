@@ -51,23 +51,26 @@ triggers) — this is new work not yet scheduled into a slice.
 - **Effort:** M (human) / S (CC).
 - **Depends on:** Slice 1 stable.
 
-### zot retention policy
-- **What:** zot `extensions.retention` config — `keepTags` by count + age,
-  `deleteReferrers: false` so SBOM/signature/provenance referrers survive with
-  their subjects.
-- **Why:** once zot lands (Slice 1.5), every build pushes an image; Slice 1.7
-  adds Tekton Task bundles; Slices 3–4 add SBOM + signature referrers. Nothing
-  GCs any of it. On OrbStack the zot PVC fills silently and `assemble` starts
-  failing with a cryptic push error.
-- **Context:** raised in the 2026-09-01 CEO review of the GitOps re-plan
-  (finding 7). Implement at **Slice 6**, alongside authz + immutability +
-  promotion — retention and immutability interact (a promoted release alias
-  must not be GC'd), so tuning it before Slice 4 referrers and Slice 6 aliases
-  exist risks deleting something a later slice needs. Interim (in the Slice 1.5
-  zot seed): a 10Gi PVC, a `df` warning in a `bootstrap.sh` check, and a
-  `docs/runbook.md` "zot PVC full → manual GC" entry.
+### zot tag immutability + retention policy
+- **What:** zot `extensions` config — (a) **tag immutability** so a pushed
+  `cv-frontend:<version>` / `cv:git-<sha>` tag cannot be overwritten; (b)
+  `retention` — `keepTags` by count + age, `deleteReferrers: false` so
+  SBOM/signature/provenance referrers survive with their subjects.
+- **Why:** (a) is the real anti-rollback control for Slice 5c —
+  `OCIRepository.spec.ref.semver` alone only blocks `:latest` mutation; an
+  attacker with push creds can push a higher version pointing at an old digest,
+  but not overwrite an existing immutable tag (outside-voice finding 8, Slice 5
+  eng review). (b) — every build pushes an image; Slices 3–4 add SBOM +
+  signature + provenance referrers; nothing GCs any of it and the zot PVC fills
+  silently.
+- **Context:** retention raised in the 2026-09-01 CEO review (finding 7).
+  **Immutability lands in Slice 5c** (needed for the anti-rollback claim).
+  **Retention/GC stays Slice 6** — retention and release-alias immutability
+  interact (a promoted version must not be GC'd), so tuning it before the
+  Slice 6 aliases exist risks deleting something a later slice needs. Interim:
+  a 10Gi PVC + a `docs/runbook.md` "zot PVC full → manual GC" entry.
 - **Effort:** S.
-- **Depends on:** Slice 6.
+- **Depends on:** Slice 5c (immutability) / Slice 6 (retention).
 
 ## P3
 
@@ -85,8 +88,11 @@ triggers) — this is new work not yet scheduled into a slice.
 - **What:** EventListener + TriggerBinding + webhook secret so `cv_frontend`
   commits auto-run the pipeline.
 - **Why:** closes the loop; the pipeline becomes real push-triggered CI.
-- **Context:** cherry-pick E5. Self-contained add once signing is stable. Note the
-  webhook receiver is a new attack surface needing a shared secret.
+- **Context:** cherry-pick E5. Self-contained add once signing is stable. The
+  webhook receiver is a new attack surface needing a shared secret. (The old
+  "needs a separate `cv_gitops` repo so the trigger can't self-fire on deploy
+  commits" concern is void post-P5 — the deploy path writes an OCI artifact, not
+  a git remote, so a source-repo push trigger has nothing to self-fire on.)
 - **Effort:** M → S with CC.
 - **Depends on:** Slice 4 (signing) done.
 
@@ -99,38 +105,61 @@ triggers) — this is new work not yet scheduled into a slice.
 - **Effort:** S.
 - **Depends on:** nothing. Do it when build time actually bites.
 
-### Convert pipeline-infra to Timoni modules
-- **What:** re-author the pipeline's own YAML (Tekton Tasks/Pipeline, zot, RBAC)
-  as CUE / Timoni modules.
-- **Why:** the stated end state — all config as OCI-artifact modules by digest.
-- **Context:** T1 wanted Timoni for app + infra + bootstrap. Slice 7 does only the
-  app; infra is its own arc. A whole set of slices when you get there (CUE for
-  20+ Tekton resources).
-- **Effort:** L.
-- **Depends on:** Slice 7 (Timoni + Flux proven for the app).
+### Convert pipeline-infra to Timoni modules + Flux (infra under GitOps)
+- **What:** re-author the pipeline's own YAML (Tekton Tasks/Pipeline, zot, RBAC,
+  cert-manager issuers, Chains config) as Timoni modules reconciled by Flux.
+- **Why:** the stated end state — all config as OCI-artifact modules by digest,
+  Flux-reconciled.
+- **Context:** Slice 5 does only the app (`modules/web-app/`, Flux
+  `OCIRepository` for `cv-frontend`). Infra is deferred with an explicit plan in
+  `docs/designs/buildpacks-pivot.md` §Slice 5 ("Infra under GitOps — deferred
+  plan"): reconcile order cert-manager → issuers → zot(TLS) → Chains → Tekton;
+  boundary = `bootstrap.sh` (or `tofu`) installs Flux + cert-manager CRDs + seed
+  Secrets, Flux owns downstream. Deferred because each adoption must stay
+  bisect-green and a Flux misconfig then breaks zot/Chains too.
+- **Effort:** L (a set of small bisect-safe commits).
+- **Depends on:** Slice 5b (the `modules/web-app/` pattern proven) + Slice 5c
+  (Flux + `cv_oci/tofu/` in place).
 
-### Convert cluster-bootstrap to Timoni modules
-- **What:** the base layer (Tekton install, Chains install, CA, Flux) as Timoni
-  modules.
-- **Why:** complete the all-config-as-modules end state.
-- **Context:** T1. Usually the last thing converted; bootstrap has chicken-egg
-  constraints (Flux can't reconcile its own install), so some of `bootstrap.sh`
-  stays imperative by necessity.
-- **Effort:** L.
-- **Depends on:** "Convert pipeline-infra to Timoni modules" above.
+### Convert cluster-bootstrap provisioning
+- **What:** the pre-Flux base layer (Tekton install, cert-manager, Chains, zot
+  seed) moves from `bootstrap.sh` into `cv_oci/tofu/` (OpenTofu), **not** Timoni.
+- **Why:** `bootstrap.sh` is frozen (Slice 5 mandate: no new bash). Provisioning
+  = OpenTofu; config generation = Timoni. The last imperative bits (secret
+  material, Flux's own install) stay minimal.
+- **Context:** Slice 5c starts `cv_oci/tofu/` for the Flux layer. This TODO
+  extends it to absorb the rest of `bootstrap.sh`, then `bootstrap.sh` is deleted.
+- **Effort:** M.
+- **Depends on:** Slice 5c (`cv_oci/tofu/` exists) + "Convert pipeline-infra"
+  above (so Flux owns what tofu doesn't).
+
+### Migrate `cv_oci/tofu/` to its own repo
+- **What:** split the OpenTofu provisioning code out of `cv_oci` into a standalone
+  infra repo.
+- **Why:** one-concern-per-repo; isolate `tofu` state; keep `cv_oci` about the
+  pipeline + app.
+- **Context:** Slice 5 keeps `tofu/` in-repo deliberately (small footprint, no
+  repo boundary through the Slice 6 reconstruction story). Split when real cloud
+  infra appears — amd64 node pools, a managed / hosted registry, DNS, the
+  Crossplane / k0rdent direction below. Note the Slice 6 implication:
+  `reconstruct.sh` would then cross a repo boundary to regenerate `tofu`-managed
+  state.
+- **Effort:** M.
+- **Depends on:** a real cloud-infra trigger (not time-based).
+
 
 ### `cv_openbao` — transit signing + secrets, its own repo
 - **What:** a standalone project: OpenBao (`openbao-distroless` 2.6, raft
   storage, static-key seal) providing (a) cosign transit signing for Tekton
   Chains via `signers.kms` + `hashivault://cosign` + OIDC/JWT auth, (b)
   OpenBao PKI as the zot cert issuer replacing the self-signed `ClusterIssuer`,
-  (c) Flux SOPS-via-transit for any `cv_gitops` secret.
+  (c) Flux SOPS-via-transit for any future encrypted Flux secret.
 - **Why:** the KMS / KMS-backed-signing lesson, done right. cv_oci ships x509
   signing (a K8s Secret + a `debt.md` row) until this exists.
 - **Context:** eng review 2026-09-02. Folding OpenBao into cv_oci as "Slice 4b"
   was rejected — it is the least-original, most-stateful item in the
   supply-chain space and would gate the distinctive Slices 5–6 (GitOps +
-  reconstruction capstone). One-concern-per-repo, like `cv_packs` / `cv_gitops`.
+  reconstruction capstone). One-concern-per-repo, like `cv_packs`.
   Research captured in `docs/designs/buildpacks-pivot.md` §`cv_openbao`. First
   task there: live wire-up of Chains→OpenBao (P6 — OIDC discovery reachability,
   sigstore health-endpoint probe, key-format skew).

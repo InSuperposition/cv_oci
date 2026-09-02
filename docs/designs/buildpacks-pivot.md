@@ -289,10 +289,10 @@ delete them when this merge lands.**
 | Slice 3 (CVE gate + SBOM) | **re-spec'd below** | Trivy only — the reproducible CVE verdict (pinned DB) + an SBOM-presence test. No `syft`/`oras`; referrers move to Slice 4. zot NetworkPolicy **dropped** (non-goal). |
 | Slice 4 (Chains) | **re-spec'd below** (eng review 2026-09-02) | zot TLS (cert-manager + trust-manager — Chains can't push to plain-HTTP) + Chains signing with the x509 key in `signing-secrets` + provenance authoring + `sigstore-bundle` referrers. **No verify run / EventListener — CM-1-A superseded.** Provenance: assert `subject` + materials-digests match, not the predicate digest (P8 fallback). |
 | Slice 5 (amd64 + multi-arch index) | **dropped** | Non-goal (Q2). Single platform digest is the release identity. Reference → non-goals. |
-| Slice 6 (promotion + zot authz) | **folded into Slice 5 (GitOps)** | Promotion is a git commit of a digest line in `cv_gitops` — no script, no authz. htpasswd + `dockerconfig` wiring land with the Flux pull credential. |
-| Slice 7 (Timoni + Flux GitOps) | **re-spec'd, renumbered Slice 5** | App deploy only, **no Timoni** (~40-line manifest). New repo `cv_gitops`; `deploy`'s tail `git push`es the digest; Flux `GitRepository` + `spec.verify`. Deterministic manifest generation. Probe P5. |
+| Slice 6 (promotion + zot authz) | **folded into Slice 5 (GitOps)** | Promotion moves an OCI tag onto a signed manifest artifact — no script, no authz. htpasswd + `dockerconfig` wiring land with the Flux pull credential. |
+| Slice 7 (Timoni + Flux GitOps) | **re-spec'd, renumbered Slice 5** (P5 + tooling mandates 2026-09-02) | App deploy only. Manifest generation = a reusable Timoni module `modules/web-app/`; `deploy` renders it and `flux push artifact`s to zot; the artifact is signed (probe-gated: Chains async or a dedicated `cv-sign-sa`); Flux `OCIRepository` (`ref.semver`) + `spec.verify: {provider: cosign}` gates the reconcile. **No `cv_gitops` git repo** (P5: `GitRepository.spec.verify` = PGP/SSH commit sigs only). Provisioning = `cv_oci/tofu/` (OpenTofu; `bootstrap.sh` frozen). Test harness ported to Chainsaw, bash scripts deleted. 3 commits: 5a Chainsaw, 5b module, 5c tofu+Flux. |
 | Slice 6 (reconstruction) — **new** | **scoped below** | The capstone: `reconstruct.sh <SHA>` rebuilds image + SBOM + verdict + provenance + manifest and asserts every digest matches deployed state. Replaces the superseded verify-run's "materials assertion". |
-| OpenBao slice | **standalone `cv_openbao` repo** (eng review 2026-09-02) | Was going to fold in as "4b"; the outside voice was right that it is the least-original, most-stateful item and it gates the distinctive Slices 5–6. Own repo, like `cv_packs` / `cv_gitops`. cv_oci keeps x509 signing + the debt row. Research (raft, static seal, `hashivault://` + OIDC/JWT) captured in the §`cv_openbao` block below. |
+| OpenBao slice | **standalone `cv_openbao` repo** (eng review 2026-09-02) | Was going to fold in as "4b"; the outside voice was right that it is the least-original, most-stateful item and it gates the distinctive Slices 5–6. Own repo, like `cv_packs`. cv_oci keeps x509 signing + the debt row. Research (raft, static seal, `hashivault://` + OIDC/JWT) captured in the §`cv_openbao` block below. |
 | `plan/` reference (rules, glossary, test layers) | **merged below** | "Reference" section, CNB-updated. Crane/apko-era layers + the NetworkPolicy + the multi-run verify design dropped. |
 
 ### The supply-chain slices (CNB-era spec)
@@ -323,9 +323,10 @@ Consequences for the slice specs:
   EventListener, no cloudevents wiring. The separate verify run existed to
   "verify a signature you didn't produce" — on this cluster the pipeline *is* the
   deployer, so that machinery is negative space. Verification happens at exactly
-  one boundary (Flux `spec.verify`, Slice 5) plus a reconstruction check
-  (Slice 6). The prior "Flux `spec.verify` is insufficient" argument (replan
-  findings 21–23) is answered: `spec.verify` checks the signature; the
+  one boundary (Flux `OCIRepository.spec.verify` cosign-gating the manifest
+  artifact, Slice 5) plus a reconstruction check (Slice 6). The prior "Flux
+  `spec.verify` is insufficient" argument (replan findings 21–23) is answered:
+  `spec.verify` on an OCI source checks the manifest-artifact signature; the
   reconstruction check covers what it can't (materials / provenance match).
 - **CM-2-A stands** — Slice 4 signs with a cosign key in a K8s Secret; OpenBao is
   a separate arc, **not a planned slice** (finding H: the trust-root cutover
@@ -340,11 +341,12 @@ Consequences for the slice specs:
   hostile tenant; every candidate policy risks breaking kubelet pulls / test
   namespaces / Flux. Non-goal (Reference); `debt.md` row → resolved-as-wontfix,
   trigger "any second node / multi-tenant".
-- **Timoni for the app deploy (eng review)** — dropped. `timoni build` to render
-  one Deployment + one Service + one digest is machinery for many-service /
-  many-environment; the manifest is ~40 lines with the digest substituted. Timoni
-  stays only in the pipeline-infra TODO (20+ Tekton resources, where CUE modules
-  earn their weight).
+- **Timoni for the app deploy** — the 2026-09-02 eng review first dropped this
+  (one Deployment + one Service is ~40 lines with the digest substituted). **The
+  Slice 5 review reversed it (user mandate):** config generation is a Timoni
+  module, never a bash heredoc — `modules/web-app/` is reusable across future
+  apps, and the project is expected to grow. The outside voice's Law-of-the-
+  Instrument objection is on record; the reversal stands on roadmap grounds.
 - **Runtime image (Q1)** — `heroku/heroku:24` (full Ubuntu 24.04) stays. A
   probe of `heroku/builder:24` + `-run-image=paketobuildpacks/run-noble-tiny`
   failed at export (`MANIFEST_INVALID`, tiny image missing
@@ -443,7 +445,7 @@ does not cover the store-alongside-image path — probed live). The blocker is
 **registry transport**, orthogonal to where the signing key lives. So Slice 4:
 zot gets TLS, and Chains signs with the cosign key in `signing-secrets` (x509).
 **OpenBao / transit signing is out of this repo** — it moves to a standalone
-`cv_openbao` project (see below), the way `cv_packs` and `cv_gitops` are separate.
+`cv_openbao` project (see below), the way `cv_packs` is separate.
 cv_oci ships x509 signing permanently with the `debt.md` row.
 
 No verify task, no verify run, no EventListener (CM-1-A superseded). Chains signs
@@ -508,8 +510,8 @@ pins the whole build environment, so this is enrichment, not a gap.
 **Git-resolve the Pipeline — deferred to Slice 5.** For a *test* run the
 pipeline comes from `kubectl apply`, not git, so `refSource` is legitimately
 empty; git-resolving would also break local iteration on `pipeline.yaml`. The
-real trigger path (`cv_gitops` → the pipeline) git-resolves in Slice 5. The
-Tekton git resolver is already enabled.
+real trigger path (a `cv_frontend` push Trigger → the git-resolved pipeline)
+git-resolves in Slice 5. The Tekton git resolver is already enabled.
 
 **Reproducible provenance — accept the documented fallback (P8 RESOLVED, T2).**
 Two byte-identical builds of one SHA (Slice 2) do NOT produce an identical
@@ -563,7 +565,7 @@ The KMS lesson (move the cosign key from a K8s Secret to OpenBao transit) is a
 standalone project, not a cv_oci slice. Rationale: it is the least-original,
 most-stateful item in the space, it would sit directly in front of the
 distinctive Slices 5–6 (GitOps + reconstruction), and one-concern-per-repo
-matches `cv_frontend` / `cv_packs` / `cv_gitops`. cv_oci keeps x509 signing with
+matches `cv_frontend` / `cv_packs`. cv_oci keeps x509 signing with
 the `debt.md` row.
 
 When `cv_openbao` is built, the design already researched:
@@ -584,69 +586,188 @@ When `cv_openbao` is built, the design already researched:
 - OpenBao **PKI** can later replace the self-signed `ClusterIssuer` for zot — a
   `cv_openbao` concern, not churn inside cv_oci.
 - Flux SOPS-via-transit (v2.9+, SA-token auth, no on-disk key) for any
-  `cv_gitops` secret — also `cv_openbao`.
+  future encrypted Flux secret — also `cv_openbao`.
 
-#### Slice 5 — reproducible deployed state (GitOps via a new `cv_gitops` repo)
+#### Slice 5 — reproducible deployed state (GitOps via a signed OCI manifest artifact)
 
-Absorbs the old standalone promotion slice. **No Timoni.** Promotion is negative
-space — a git commit of a digest line, never a rebuild, never a script.
+Absorbs the old standalone promotion slice. Promotion is negative space — an
+immutable version tag pointing at an already-signed artifact, never a rebuild.
 
-**New repo: `github.com/InSuperposition/cv_gitops`** — the delivery half to
-cv_oci's integration half. Its own bisect-safe history + design doc (like
-`cv_packs`). Separate from cv_oci (not a subdir) so a future push-trigger on
-cv_oci can't self-fire on deploy commits, and the push credential never touches
-source. Acyclic dataflow:
+**Probe P5 finding (2026-09-02).** Flux `GitRepository.spec.verify` verifies
+**git commit / tag signatures only** — PGP (`.asc`) / SSH (`.sshpub`), modes
+`HEAD` / `Tag` / `TagAndHEAD`. It does **not** look at the image a manifest
+references, an attestation, or any OCI content. Cosign-gated reconcile exists
+**only on `OCIRepository.spec.verify`** (`provider: cosign` | `notation`). The
+earlier design (finding L) assumed a `GitRepository` could cosign-gate the
+reconcile while its commits stayed unsigned — P5 shows that is two incompatible
+halves. **Decision:** no `cv_gitops` git repo. The delivery channel is a signed
+OCI artifact in zot, verified by a Flux `OCIRepository`.
+
+**Tooling decisions (Slice 5 eng review, 2026-09-02).** Three mandates from the
+user reshaped this slice:
+- **Config generation is a Timoni module, never a bash script / heredoc /
+  `envsubst`.** The manifest generator is a reusable, consumer-agnostic Timoni
+  module `modules/web-app/` (CUE) that renders a Deployment + Service for a
+  stateless HTTP web app. `cv_frontend` is one instance
+  (`timoni build cv-frontend ./modules/web-app --values <image digest, port>`).
+- **No new bash, including `bootstrap.sh`.** `bootstrap.sh` is frozen at what it
+  does today (Tekton, ns/RBAC, cert-manager, zot seed, Chains). New cluster
+  provisioning is **OpenTofu** in `cv_oci/tofu/` — composable modules,
+  `tflint` + `tofu test`, migratable to its own repo once real cloud infra
+  appears (TODO).
+- **The bash acceptance harness is retired.** `scripts/test/{e2e,negative,repro}.sh`
+  are ported to **Chainsaw** (Kyverno's declarative K8s e2e tool) and deleted.
+  Registry / CLI assertions (is the artifact signed, does `cosign verify` pass,
+  is anon pull denied) land in Chainsaw `script:` leaves — that bash is
+  relocated into test YAML, not eliminated; accepted.
+
+The outside voice pushed back on all three (Law-of-the-Instrument risk;
+`cue export` already covers CUE→YAML; enlarges the Slice 6 reconstruction
+surface; a declarative test tool is a poor fit for registry assertions). The
+mandates stand on roadmap / direction grounds; the concrete gaps it raised
+(probes P11a-c, P13, zot tag immutability, unstated RBAC deps) are folded in
+below.
+
+**Sequencing — three independently-green, bisect-safe commits:**
 
 ```
-cv_frontend push → cv_oci pipeline → build → scan → sign (Chains, async)
+5a  Chainsaw adoption. Port e2e + negative + repro coverage to Chainsaw
+    suites; delete scripts/test/*.sh. Same assertions, new tool. GREEN.
+
+5b  modules/web-app/ (Timoni). deploy + smoke render their manifests from
+    the module; still `kubectl apply` (no Flux yet). GREEN.
+    Probe P13: `timoni build` of one (module, values) twice → identical bytes.
+
+    ─── probes P11a / P11b / P11c / P12 run live here (Flux installed in a
+        throwaway ns), before 5c commits ───
+
+5c  cv_oci/tofu/ provisions Flux + the 3 Secrets + the Flux CRs. deploy's
+    tail becomes `timoni build → sign → flux push artifact`; `kubectl apply`
+    is gone. OCIRepository{ref.semver, verify: cosign} gates the reconcile.
+    zot tag immutability configured. GREEN.
+
+6   reconstruct.sh capstone.
+```
+
+**Acyclic dataflow (5c end state):**
+
+```
+cv_frontend push → cv_oci pipeline → build → scan → sign image (Chains, async)
                                        │
-                                       └─ deploy: git push digest → cv_gitops → Flux → cluster
+                                       └─ deploy: timoni build cv-frontend
+                                                  → sign the artifact
+                                                  → flux push artifact
+                                                     oci://<zot>/cv-frontend:<version>
+                                                  → Flux OCIRepository (cosign-gated)
+                                                  → Flux Kustomization → cluster
 ```
 
-**Contents of `cv_gitops`:** a Flux `Kustomization` + a plain `cv` manifest
-(Deployment + Service) with the image digest as the only per-release variable.
-The manifest is **generated deterministically** from `(app digest, a pinned
-template in cv_oci)` — a test asserts regeneration is byte-identical. `cv_gitops`
-HEAD content is therefore a pure function of the verified build.
+**The manifest artifact.** `timoni build cv-frontend ./modules/web-app --values
+image.digest=<APP_IMAGE_DIGEST> …` renders the Deployment + Service; the deploy
+step `flux push artifact oci://<zot>/cv-frontend:<version> --path <render-dir>
+--source <pipeline-repo-url> --revision <cv_frontend-sha>` pushes it. **Probe
+P13** confirms `timoni build` is byte-deterministic across runs (Timoni stamps
+`app.kubernetes.io/managed-by`, version labels, possibly a config checksum — the
+probe pins whether those are stable, and `reconstruct.sh` asserts against
+whatever set survives). The artifact digest is a pure function of
+`(module version, cv_frontend image digest, values)`.
 
-**Promotion.** `cv_gitops` `main` = every verified build ships (continuous
-deployment; "promote by reference, never rebuild" is demonstrated by the absence
-of any rebuild path). If a human gate is ever wanted: a `release` branch Flux
-watches, and promotion is `git cherry-pick`.
+**Signing the artifact — probe-gated.** Run three probes live in 5b before 5c:
+- **P11a** — can Flux `OCIRepository.spec.verify` (`provider: cosign`, key mode)
+  verify a **keyed, no-Rekor** signature against a **self-signed-TLS** registry
+  at all? Chains runs `transparency.enabled = false`; Slice 4 needed
+  `cosign verify --insecure-ignore-tlog=true --allow-insecure-registry`. If
+  Flux's cosign path has no equivalent knobs, the verify mechanism is dead on
+  arrival and needs rethinking (notation? a sidecar verifier?).
+- **P11b** — does Chains sign a `flux push artifact` media type
+  (`application/vnd.cncf.flux.content.v1.tar+gzip`) at all, via a
+  `manifests_ARTIFACT_OUTPUTS` typed result? Chains' signer graph is built
+  around image manifests.
+- **P11c** — if P11a+P11b pass: does Flux read the Chains `sigstore-bundle`
+  referrer, or does it need the classic `sha256-<digest>.sig` tag?
 
-**zot auth.** htpasswd — anonymous pull denied, one CI credential wired through
-the `build` task's `dockerconfig` workspace + a Flux `imagePullSecret`. zot is
-**already TLS** as of Slice 4, so Basic-auth creds are not on the wire in the
-clear. The htpasswd + the two `dockerconfigjson` Secrets are generated by
-`bootstrap.sh` (idempotent, only if absent) — plain K8s Secrets, **not** SOPS,
-**not** a file. Once `cv_openbao` exists, they move to an OpenBao `kv` entry
-synced by the OpenBao Secrets Operator; until then a K8s Secret is the honest
-trust level (debt row).
+  **P11a+b+c all pass** → the `deploy` task emits `manifests_ARTIFACT_OUTPUTS =
+  {uri, digest}`; Chains signs async; no signing key in the pipeline.
+  **Any fail** → an explicit signer. **Not** `cv-deploy-sa` with the private key
+  (that voids the per-stage-SA spine and "the build task has no signing
+  credentials"). Instead: a dedicated single-purpose `cv-sign-sa` whose only
+  grant is `get` on the signing key, running `cosign sign` in an isolated step;
+  or `cosign attach signature` translating the Chains bundle to the `.sig` tag.
+  Either way a `debt.md` row: the signing key is reachable from a pipeline SA
+  until `cv_openbao` transit (the SA then calls the transit sign API, holds no
+  key material).
 
-**Flux.** A `GitRepository` watches `cv_gitops`; a `Kustomization` applies the
-`cv` manifest; the image is pulled from zot by digest;
-`GitRepository.spec.verify` (cosign) gates the reconcile. **Probe P5:** exact
-scope of `spec.verify` on a git source (the commit only? the referenced image?
-attestations? bounded retry?).
+**Flux.** An `OCIRepository` tracks `oci://<zot>/cv-frontend` by
+`.spec.ref.semver: ">=0.0.0"` (**never a mutable `:latest` tag**);
+`.spec.verify: {provider: cosign, secretRef: chains-signing-public-key}`
+(the public key, read from the live cluster in `tofu`, never committed) gates
+the reconcile; a `Kustomization` (`prune: true`) applies the artifact; the app
+image is pulled from zot by digest. Verification failure → `Ready=False`,
+retried on `.spec.interval` (short in test namespaces; ~1–5m steady). If signing
+is async (Chains path) the first reconciles `VerificationError` until the bundle
+lands (~30–60s, minutes under load) — **P12** confirms self-heal; the runbook
+documents the transient as expected.
 
-**`deploy` leaves `kubectl apply` behind** — its tail becomes `git push` to
-`cv_gitops` via a narrow deploy key. Flux owns the workload.
+**Deploy-path RBAC + toolchain (outside-voice finding 12):**
+- `flux` CLI (and `timoni`) pinned in `digests.cue` + `docs/bootstrap-toolchain.md`,
+  in the deploy step image.
+- The push identity (`cv-deploy-sa` or `cv-sign-sa`) needs push rights to the
+  `cv-frontend` repo path in the now-authed zot — it has none today.
+- Flux `kustomize-controller`'s SA needs RBAC to create Deployment/Service in
+  the app namespace, and its pods must be PSA-`restricted` compliant (Slice 1.7
+  gotcha: check the vendored Flux manifests, patch if needed).
 
-**Commit signing (eng-review finding L):** don't sign the `cv_gitops` commits —
-the trust anchor is the cosign-signed *image digest* the manifest references, not
-the commit. Avoids another in-cluster signing key with no KMS story.
+**Promotion.** The deploy push assigns a monotonic version — **CalVer from the
+PipelineRun start time** (`0.<YYYYMMDD>.<HHMMSS>` normalized to semver, or a
+committed `VERSION` file bumped as a reviewed commit; decided in 5c). Every
+verified build ships (continuous deployment). `.spec.ref.semver` means the
+resolver never selects a *lower* version — but an attacker with zot push creds
+can still push a *higher* version pointing at an old digest, so the real
+anti-rollback controls are (a) `spec.verify` (gates content regardless of tag)
+and (b) **zot tag immutability** (`extensions` config — a pushed
+`cv-frontend:<version>` tag cannot be overwritten). Retention / GC stays with
+the existing "zot retention policy" TODO (`Depends on: Slice 6`).
 
-**Environment note (eng-review finding N — corrected 2026-09-02):** the OrbStack
-cluster and its `local-path` PVs **persist** across `orb restart` (verified:
-`cv-pipeline` + zot PVC survived days of multi-session work). Only the throwaway
-`cv-e2e-*` / `cv-repro-*` test namespaces are ephemeral. So the "manual `kubectl
-edit` is reverted by Flux" test and the repro CronJob run fine on the live
-cluster; the earlier "torn down between sessions" note was wrong.
+**zot auth.** htpasswd — anonymous pull denied. The htpasswd Secret + the
+`dockerconfigjson` pull Secret(s) + the `chains-signing-public-key` Secret are
+created by `cv_oci/tofu/` (**not** `bootstrap.sh` — frozen), idempotent. zot is
+already TLS (Slice 4) so Basic-auth creds are not on the wire in the clear.
+Once `cv_openbao` exists they move to an OpenBao `kv` entry synced by the
+OpenBao Secrets Operator (debt row).
 
-**Acceptance:** the deploy `git push` lands in `cv_gitops`; regenerating the
-manifest is byte-identical; Flux reconciles `cv` to the pushed digest; `cosign
-verify` gates the reconcile; a tampered `cv_gitops` commit fails; anonymous zot
-pull denied.
+**`smoke` also renders from `modules/web-app/`** — an ephemeral instance
+(throwaway name, label-selector teardown, no Service-DNS assumption) so the pod
+shape lives in exactly one place. Cost (outside-voice finding 13): the module
+needs parameterization for the ephemeral vs real shape, which erodes some of the
+byte-identical simplicity, and `smoke` gains a Timoni + CUE dependency it did
+not have. Accepted for the DRY win.
+
+**Flux scope = the `cv-frontend` app only.** zot / cert-manager / Chains
+manifests stay `bootstrap.sh` `kubectl apply`. The infra-under-GitOps migration
+is deferred with an explicit plan (below).
+
+**Environment note (finding N — corrected 2026-09-02):** the OrbStack cluster
+and its `local-path` PVs **persist** across `orb restart` (verified). Only the
+throwaway test namespaces are ephemeral. So the "manual `kubectl edit` is
+reverted by Flux" test and the repro CronJob run fine on the live cluster.
+
+**Acceptance (Chainsaw suites):** the deploy push lands `cv-frontend:<version>`
+in zot with an immutable tag; `timoni build` is byte-deterministic (P13);
+the artifact is signed; Flux's `OCIRepository` reaches `SourceVerified: True`
+only after `spec.verify` passes; a tampered or unsigned artifact →
+`VerificationError`, no reconcile; the rendered `cv-frontend` Deployment/Service
+is field-equivalent to today's inline `cv` Deployment (regression); the
+`kustomize-controller` reconciles `cv-frontend` to the pushed image digest;
+a manual `kubectl edit` is reverted within one interval; `cv_oci/tofu/`
+`tofu apply` is idempotent on a provisioned cluster; anonymous zot pull → 401.
+
+**Infra under GitOps — deferred plan.** When adopted (a later slice, its own
+bisect-safe commits): reconcile order `cert-manager → its issuers → zot (TLS) →
+Chains → Tekton`; the chicken-egg boundary is `bootstrap.sh` (or `tofu`)
+installs Flux + the cert-manager CRDs + the seed Secrets, then Flux owns
+everything downstream. Deferred because each adoption must stay bisect-green and
+the blast radius (a Flux misconfig then breaks zot/Chains too) wants its own
+slice. Ties into the two "convert to Timoni modules" TODOs.
 
 #### Slice 6 — zero-trust reconstruction (the capstone)
 
@@ -658,8 +779,15 @@ The payoff of the spine. A check that, given **only** `cv_frontend@SHA` and
 - re-runs the CVE scan at the pinned DB digest (identical verdict),
 - rebuilds the provenance and asserts its `subject` + `resolvedDependencies`
   match (the predicate is not itself content-addressed — P8 fallback),
-- regenerates the `cv_gitops` manifest (identical bytes),
+- regenerates the `cv-frontend` deployment artifact via `timoni build` at the
+  pinned module version (identical bytes — P13 governs which labels survive),
 - asserts every digest matches what is currently deployed.
+
+The Timoni + `tofu` additions enlarge this surface (outside-voice finding 4):
+`reconstruct.sh` needs the pinned `timoni` binary + module version + CUE
+toolchain to regenerate the artifact, and `reconstruct.sh` itself (still bash —
+it is a verifier, not config generation) shells out to `timoni build`. P13
+bounds the determinism risk.
 
 A verifier runs this with zero trust in the pipeline operator — signatures become
 a fast path, not the root of trust. Runs as a CronJob on a persistent cluster, or
@@ -675,7 +803,12 @@ with the specific mismatch named.
 | Probe | Question | Gates | Status |
 |---|---|---|---|
 | **P4** | Can the Tekton **bundles** resolver pull task/pipeline bundles from plain-HTTP zot? | a later "tasks as OCI bundles" nicety — nothing in Slices 3–6 depends on it | open (moot once zot is TLS in Slice 4) |
-| **P5** | Flux `GitRepository.spec.verify` exact scope on a git source — commit only, or the referenced image? attestations? bounded retry? | Slice 5 | open — run before Slice 5 |
+| **P5** | Flux `GitRepository.spec.verify` exact scope on a git source — commit only, or the referenced image? attestations? bounded retry? | Slice 5 | **RESOLVED (2026-09-02)** — git commit/tag signatures ONLY (PGP `.asc` / SSH `.sshpub`; modes `HEAD`/`Tag`/`TagAndHEAD`). No image, no attestation. Cosign-gating is `OCIRepository.spec.verify` only. → Slice 5 drops the git repo for a signed OCI manifest artifact. Retry is on `spec.interval`, no special backoff. |
+| **P11a** | Can Flux `OCIRepository.spec.verify` (`provider: cosign`, key mode) verify a **keyed, no-Rekor** signature against a **self-signed-TLS** registry at all? Chains runs `transparency.enabled=false`; Slice 4 needed `--insecure-ignore-tlog=true --allow-insecure-registry`. If Flux exposes no equivalent, the verify mechanism is dead on arrival. | Slice 5c — gates whether cosign is viable at all | open — run live in 5b |
+| **P11b** | Does Chains sign a `flux push artifact` media type (`application/vnd.cncf.flux.content.v1.tar+gzip`) via a `manifests_ARTIFACT_OUTPUTS` typed result? Chains' signer graph is image-manifest shaped. | Slice 5c — the "no key in pipeline" path | open — run live in 5b |
+| **P11c** | If P11a+P11b pass: does Flux read the Chains `sigstore-bundle` referrer, or need the classic `sha256-<d>.sig` tag? | Slice 5c signature format | open — run live in 5b. Fail → `cosign attach` shim or a dedicated `cv-sign-sa` running `cosign sign`. |
+| **P12** | Does the `OCIRepository` reach `SourceVerified` on its own once an async signature lands (interval retry absorbs the latency), no manual reconcile? | Slice 5c deploy flow | open — run live in 5b |
+| **P13** | Is `timoni build` of one `(module, values)` byte-deterministic across runs and across a Timoni version bump? Which labels/annotations (`managed-by`, version, config checksum) does it stamp? | Slice 5b generator + Slice 6 reconstruction | open — run in 5b |
 | **P6** | Chains + sigstore `hashivault://` against OpenBao — scheme? auth? | `cv_openbao` (separate repo) | provisionally resolved (docs): `hashivault://` should work against OpenBao; auth = OIDC/JWT via the Chains SA token. Live wire-up is `cv_openbao`'s first task. |
 | **P8** | Can the `slsa/v2alpha4` predicate's timestamps + run UID be normalized so two builds give an identical provenance digest? | Slice 4 reproducible provenance | **RESOLVED (T2)** — no normalize knob, but `resolvedDependencies` entries are `{uri, digest}` only. `repro.sh` asserts `subject` + the sorted materials-digest set. |
 | **P9** | Chains `storage: oci` — tag scheme or OCI 1.1 Referrers API? | Slice 4 referrer layout | **RESOLVED** — `storage.oci.encoding-format: sigstore-bundle` → Referrers API; `oras discover` sees them (verified T2). |
@@ -721,11 +854,11 @@ question was settled by the OrbStack service-DNS finding.
 | Multi-arch / amd64 / OCI image index | No amd64 node available; single-node arm64 OrbStack. Release identity is the single platform digest. | a real deploy target or `cv_packs` needs amd64 — new design, not a resumed slice |
 | zot NetworkPolicy | Single-node solo cluster, no hostile tenant; every candidate policy risks breaking kubelet pulls / test namespaces / Flux. | any second node, or any multi-tenant scenario |
 | Distroless / minimal run image | Adopting a stock builder means adopting its run image; `heroku` has no distroless variant and a `run-noble-tiny` override failed at export (Q1). | a compatible distroless multi-arch run image exists, or a second node raises the stakes |
-| Standalone promotion slice | Folded into Slice 5 (GitOps). Promotion is a git commit of a digest line in `cv_gitops` — no script, no pipeline, no candidate/release authz. `main` ships every verified build; a `release` branch + `git cherry-pick` if a gate is ever wanted. | never (this is the shape) |
-| Separate verify+deploy PipelineRun (CM-1-A) | Superseded. It solved "verify a signature you didn't produce"; on a single-actor cluster that is negative space. Verification = Flux `spec.verify` (one boundary) + the Slice 6 reconstruction check. | a real external consumer of the signed artifact appears |
-| Timoni for the app deploy | ~40-line manifest, one service; `timoni build` is for many-service / many-env. | stays in the pipeline-infra TODO (20+ Tekton resources) |
+| Standalone promotion slice | Folded into Slice 5 (GitOps). Promotion is an immutable monotonic version tag on an already-signed `cv-frontend` artifact — no script, no pipeline, no candidate/release authz. Every verified build ships (continuous deployment); a `release` semver track + `cosign copy` if a gate is ever wanted. | never (this is the shape) |
+| Separate verify+deploy PipelineRun (CM-1-A) | Superseded. It solved "verify a signature you didn't produce"; on a single-actor cluster that is negative space. Verification = Flux `OCIRepository.spec.verify` (one boundary) + the Slice 6 reconstruction check. | a real external consumer of the signed artifact appears |
+| Bash for config generation | User mandate (Slice 5 review): manifest / config generation is a Timoni module (`modules/web-app/`), never a heredoc + `sed`/`envsubst`. `bootstrap.sh` is frozen; new provisioning is `cv_oci/tofu/`. | n/a — this is the shape now |
 | OpenBao / transit signing / SOPS / PKI in **cv_oci** | These are `cv_openbao`'s concern — a standalone repo (§`cv_openbao`). cv_oci ships x509 signing + the debt row. Folding a stateful secrets service in front of Slices 5–6 (the distinctive material) is the gold-plating the 2026-09-02 eng review cut. | never in cv_oci; build `cv_openbao` when you want the KMS lesson |
-| SOPS as a tool anywhere | No encrypted secret exists yet. `bootstrap.sh` generates the K8s Secrets it needs (idempotent, only-if-absent). Adding SOPS for zero secrets is negative space. | `cv_gitops` grows a real encrypted value → `cv_openbao`'s Flux-SOPS-via-transit |
+| SOPS as a tool anywhere | No encrypted secret exists yet. `bootstrap.sh` generates the K8s Secrets it needs (idempotent, only-if-absent). Adding SOPS for zero secrets is negative space. | a Flux source grows a real encrypted value → `cv_openbao`'s Flux-SOPS-via-transit |
 
 ### Component boundaries (CNB)
 
@@ -744,23 +877,31 @@ question was settled by the OrbStack service-DNS finding.
   fixable-CRITICAL policy. Does **not** author the SBOM.
 - **Tekton Chains** owns automated trust evidence: signing, PipelineRun SLSA
   provenance, OCI referrer storage. PipelineRun-level, async, observe-only-safe.
-- **cosign** is a verify/debug CLI — Flux `spec.verify`, the reconstruction check,
-  operators. Not in build steps where Chains already signs.
+- **cosign** is a verify/debug CLI — Flux `OCIRepository.spec.verify`, the
+  reconstruction check, operators. Not in build steps where Chains already signs
+  (unless P11 forces an explicit `cosign sign` in `deploy` — debt row).
 - **`crane` / `oras`** are narrow OCI-op CLIs: host-side verification in the test
   scripts, referrer attach (Slice 4). Not in the build path.
 - **`reconstruct.sh`** (Slice 6) is the ground-truth verifier — rebuilds the
   chain from `SHA` + `digests.cue`, asserts every digest matches deployed state.
-- **Flux** (Slice 5) owns the app's declarative deploy; `cv_gitops` (a separate
-  repo, plain digest-pinned manifest — no Timoni) is the git source of truth it
-  reconciles.
+- **Flux** (Slice 5) owns the app's declarative deploy; a signed `cv-frontend`
+  OCI artifact in zot (a Timoni `modules/web-app/` render, digest-pinned, no git
+  repo) is the source of truth it reconciles via an `OCIRepository`.
+- **Timoni** (Slice 5b) is the config-generation tool — `modules/web-app/`
+  renders the workload; the deploy step runs `timoni build`. Not an apply path
+  (Flux applies).
+- **OpenTofu** (Slice 5c, `cv_oci/tofu/`) provisions the Flux install, the
+  Secrets, and the Flux CRs. `bootstrap.sh` is frozen at the pre-Flux layer.
+- **Chainsaw** (Slice 5a) is the acceptance-test tool — the bash harness
+  (`e2e.sh` / `negative.sh` / `repro.sh`) is ported to it and deleted.
 
 ### Operational rules (CNB)
 
 1. **One problem, one owner.** deps → npm/lockfile; image production → the CNB
    lifecycle; orchestration → Tekton; intermediate artifacts → the per-run PVC;
    registry → zot; CVE policy → Trivy; SBOM → the lifecycle; signing + provenance
-   → Chains; deploy-time verification → Flux `spec.verify`; ground-truth
-   verification → `reconstruct.sh`; deploy → Flux (Slice 5).
+   → Chains; deploy-time verification → Flux `OCIRepository.spec.verify`;
+   ground-truth verification → `reconstruct.sh`; deploy → Flux (Slice 5).
 2. **Prefer deletion over abstraction.** The pivot is the worked example.
 3. **arm64 only, no QEMU.** Multi-arch is out of scope (Q2). The
    `nodeSelector: kubernetes.io/arch: arm64` on the pipeline pods is a
@@ -806,31 +947,43 @@ question was settled by the OrbStack service-DNS finding.
   [ALL]`, `seccompProfile: RuntimeDefault`, `automountServiceAccountToken: false`
   where not needed. Exception until Slice 1.7: the `build` task's `prepare` step
   runs uid 0 (`debt.md`).
-- **Registry auth** (Slice 5): htpasswd on zot — anonymous pull denied, one CI
-  credential wired through the `build` task's `dockerconfig` workspace + a Flux
-  `imagePullSecret`. htpasswd-over-plain-HTTP puts Basic-auth creds on the wire
-  in the clear — acceptable on the loopback solo cluster, TLS mandatory at any
-  non-loopback hop (`debt.md`). Release-write separation is structural, not
-  authz: the pipeline only ever pushes candidates to `cv/`; releases are declared
-  in `cv_gitops` (a repo the pipeline reaches only via a narrow deploy key).
-- **Signing.** Chains signs the app digest async (Slice 4). Dev = cosign key as a
-  K8s Secret; KMS = the OpenBao arc (not planned).
+- **Registry auth** (Slice 5c): htpasswd on zot — anonymous pull denied. The
+  htpasswd Secret + the `dockerconfigjson` pull Secret + the
+  `chains-signing-public-key` Secret are created by `cv_oci/tofu/` (**not**
+  `bootstrap.sh` — frozen), idempotent. zot is TLS (Slice 4) so Basic-auth creds
+  are not on the wire in the clear (`debt.md` keeps the "TLS mandatory at any
+  non-loopback hop" note). zot **tag immutability** (`extensions` config) makes a
+  pushed `cv-frontend:<version>` tag un-overwritable — this plus `spec.verify` is
+  the anti-rollback control (`.spec.ref.semver` alone only blocks `:latest`
+  mutation). Release-write separation is structural: the pipeline pushes the app
+  image to `cv/` and the deployment artifact to `cv-frontend/`; a release is an
+  immutable version tag — no rebuild, no separate identity.
+- **Signing.** Chains signs the app image async (Slice 4). The `cv-frontend`
+  deployment artifact is signed probe-gated (P11a/b/c): Chains async, or a
+  dedicated single-purpose `cv-sign-sa` running `cosign sign` (**not**
+  `cv-deploy-sa` — that would void the per-stage-SA spine). Dev = the x509 key in
+  `signing-secrets`; KMS = the `cv_openbao` transit arc (debt row: a pipeline SA
+  can reach the key until then).
 - **Provenance.** PipelineRun-level SLSA (`slsa/v2alpha4`). Names the
   `cv_frontend` SHA, the git-resolved pipeline definition (git resolver, from
   GitHub), the builder + run-image + buildpack digests, the app digest, every
   pinned input. Normalized to be content-addressable if probe P8 allows.
 - **Deployment trust.** Signing is not protection unless the consumer verifies.
-  Two layers: Flux `GitRepository.spec.verify` cosign-gates the reconcile
-  (Slice 5, deploy-time, in-path); `reconstruct.sh` rebuilds the whole chain and
-  checks digests (Slice 6, out-of-path, ground truth). Deploy by digest
-  throughout.
-- **Negative space.** No separate verify PipelineRun (CM-1-A superseded). The
-  build task has no signing credentials and no deploy rights. The deploy path has
-  no source write and no image-build privileges — its only outbound write is a
-  `git push` to `cv_gitops` via a scoped deploy key (commits are unsigned; the
-  trust anchor is the cosign-signed image digest the manifest references).
-  `cv-build-sa` mounts no token. The runtime image has no tooling *added* beyond
-  what `heroku/heroku:24` ships — a recorded compromise (Rule 9).
+  Two layers: Flux `OCIRepository.spec.verify` (`provider: cosign`) gates the
+  reconcile on the `cv-frontend` artifact signature (Slice 5c, deploy-time,
+  in-path); `reconstruct.sh` rebuilds the whole chain and checks digests
+  (Slice 6, out-of-path, ground truth). Deploy by digest throughout. **P11a
+  gates whether cosign verification is viable at all** against a keyed, no-Rekor,
+  self-signed-TLS setup.
+- **Negative space.** No separate verify PipelineRun (CM-1-A superseded). No
+  `cv_gitops` git repo, no deploy key, no commit signing (P5). The `build` task
+  has no signing credentials and no deploy rights. The deploy path has no source
+  write and no image-build privileges — its only outbound write is a
+  `flux push artifact` of the Timoni-rendered manifests to `cv-frontend/` in zot.
+  The trust anchor is the cosign signature on that artifact (and, transitively,
+  the signed app-image digest it pins). If signing needs an explicit signer, it
+  is `cv-sign-sa` (one grant: `get` on the key), not the deploy identity.
+  `cv-build-sa` mounts no token.
 
 ### Test layers (CNB)
 
@@ -862,13 +1015,23 @@ question was settled by the OrbStack service-DNS finding.
     of one SHA → identical provenance predicate digest (or the P8 fallback gap is
     documented); predicate names the expected pipeline + tasks + pinned inputs +
     `cv_frontend` SHA.
-12. **Deterministic-manifest test** (Slice 5): regenerating the `cv_gitops`
-    manifest from `(app digest, template)` is byte-identical; Flux reconciles to
-    the pushed digest; a manual `kubectl edit` is reverted; `spec.verify` gates
-    the reconcile; a tampered `cv_gitops` commit fails.
+12. **Slice 5 suite** (Chainsaw): `timoni build cv-frontend` twice → identical
+    bytes (P13); the rendered `cv-frontend` Deployment/Service is field-equivalent
+    to today's inline `cv` Deployment (regression); the pushed
+    `cv-frontend:<version>` tag is immutable; the artifact is signed; the
+    `OCIRepository` reaches `SourceVerified: True` only after `spec.verify`
+    passes; a tampered / unsigned artifact → `VerificationError`, no reconcile;
+    the `kustomize-controller` reconciles `cv-frontend` to the pushed image
+    digest; a manual `kubectl edit` is reverted within one interval;
+    `tofu apply` is idempotent on a provisioned cluster; anonymous zot pull → 401.
 13. **Reconstruction test** (Slice 6, `reconstruct.sh`): given only
     `cv_frontend@SHA` + `digests.cue`, every rebuilt artifact digest matches the
-    deployed state; a tampered deployed digest is named as a mismatch.
+    deployed state (incl. `timoni build` of the deployment artifact at the pinned
+    module version); a tampered deployed digest is named as a mismatch.
+
+**Test tooling (Slice 5a):** `scripts/test/{e2e,negative,repro}.sh` are ported to
+Chainsaw suites and deleted. Registry / CLI assertions (signed? `cosign verify`?
+anon pull?) live in Chainsaw `script:` leaves.
 
 Retired layers — release-tree tests, workspace-boundary write tests, manual
 OCI-assembly tests, multi-arch index test — described the crane/apko pipeline and
@@ -965,24 +1128,31 @@ per the table above.
 **Slices 3–6 (the reconstruction spine):** each artifact is a deterministic
 function of `cv_frontend@SHA` + `digests.cue` — CVE verdict at a pinned DB
 (Slice 3), content-addressable provenance (Slice 4, probe P8), byte-identical
-regenerated manifest (Slice 5), and `reconstruct.sh` asserts every digest against
-deployed state with zero trust in the operator (Slice 6). Each slice lands as its
-own green, bisect-safe commit.
+`timoni build` of the deployment artifact at the pinned module version (Slice 5,
+probe P13), and `reconstruct.sh` asserts every digest against deployed state with
+zero trust in the operator (Slice 6). Each slice lands as its own green,
+bisect-safe commit — Slice 5 as three (5a Chainsaw, 5b module, 5c tofu+Flux).
 
 ## Distribution Plan
 
 - **App image:** built by the vendored `buildpacks` 0.6 task in-cluster, pushed to
-  zot, deployed by digest — `kubectl apply` now; from Slice 5, Flux reconciles a
-  digest-pinned manifest in the `cv_gitops` repo. No external distribution.
+  zot, deployed by digest — `kubectl apply` now; from Slice 5c, Flux reconciles a
+  digest-pinned manifest from the signed `cv-frontend` OCI artifact in zot. No
+  external distribution.
 - **CI/CD:** the pipeline is its own CI/CD, `tkn`-triggered now; a Tekton Trigger
-  on `cv_frontend` push stays a TODO (needs Slice 4 stable first, and a separate
-  `cv_gitops` repo so the trigger can't self-fire on deploy commits).
+  on `cv_frontend` push stays a TODO (needs Slice 4 stable first; the deploy path
+  writes an OCI artifact, not a git remote, so a future source-repo trigger has
+  nothing to self-fire on).
 
 ## Dependencies
 
 - **Push `cnb-pivot`** (or merge to `main` + push) — Slice 4's git-resolved
   pipeline needs `pipeline.yaml` reachable from GitHub.
-- **`cv_gitops` repo created** — blocks Slice 5.
+- **Slice 5 new tooling** (all pinned in `digests.cue` + `docs/bootstrap-toolchain.md`):
+  `chainsaw` (5a), `timoni` (5b), `tofu` + `tflint` (5c), Flux
+  `source-controller` + `kustomize-controller` (5c, vendored). `flux` + `timoni`
+  CLIs also land in the deploy step image.
+- **Probes P11a/P11b/P11c/P12/P13** run live in 5b before 5c commits.
 - Historical (done): `cv_frontend` Node-prep → gate zero; zot seed → Commit 1a;
   gate-zero result → Approach A; old-doc demotion → Commit 0.
 
@@ -1041,12 +1211,16 @@ is one address (OrbStack service DNS + daemon `insecure-registries`).**
      authoring; referrers via `sigstore-bundle`). Chains v0.29 + config are
      already applied from the probe run — Slice 4 adds the TLS that lets the
      push succeed. P8/P9 resolved, P10 partial. **OpenBao is not in this repo.**
-   - → **Slice 5** (GitOps via `cv_gitops`; probe P5; htpasswd = a K8s Secret) →
-     **Slice 6** (`reconstruct.sh` capstone — the distinctive payoff).
+   - → **Slice 5** (eng-reviewed 2026-09-02 — see the Slice 5 section + the
+     GSTACK REVIEW REPORT). Three commits: **5a** port the acceptance harness to
+     Chainsaw + delete the bash scripts; **5b** `modules/web-app/` Timoni module,
+     `deploy` + `smoke` render from it (still `kubectl apply`), run probes
+     P11a/b/c + P12 + P13; **5c** `cv_oci/tofu/` provisions Flux + Secrets + CRs,
+     `deploy` → `timoni build` → sign → `flux push artifact`, `OCIRepository`
+     (`ref.semver`) + `spec.verify` gates, zot tag immutability.
+     → **Slice 6** (`reconstruct.sh` capstone — the distinctive payoff).
 6. **`cv_packs` project** — separate, later, its own design doc.
-7. **`cv_gitops` project** — new repo, created when Slice 5 starts, its own
-   design doc (like `cv_packs`).
-8. **`cv_openbao` project** — transit signing + Flux SOPS-via-transit + PKI.
+7. **`cv_openbao` project** — transit signing + Flux SOPS-via-transit + PKI.
    Own repo, own design doc; cv_oci ships x509 signing (debt row) until then.
    Research captured in the §`cv_openbao` block above.
 
@@ -1136,22 +1310,15 @@ JSONL: `~/.gstack/projects/InSuperposition-cv_oci/tasks-eng-review-20260901-2134
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
-| CEO Review | `/plan-ceo-review` | Scope & strategy | 3 | issues_open (folded) | 2026-09-01: HOLD_SCOPE — `cv_packs` decouple confirmed, doc demotion → Commit 0. Graded the pivot plan. |
-| Codex Review | `/codex review` | Independent 2nd opinion | 3 | issues_found (folded) | `codex exec` stalls on this repo every attempt (logged); Claude subagent ran all three. This run: 15 findings on the SSOT-merge back half. |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 5 | issues_open (folded) | 2026-09-01 SSOT-merge: 9 + 15 outside-voice findings, reconstruction spine. **2026-09-02 Slice 4:** blocker probed live (Chains can't push to plain-HTTP zot); OpenBao split off to `cv_openbao`; zot TLS via cert-manager + trust-manager; 9 outside-voice findings (2 cross-model tensions → user, 7 corrections applied); 8 tasks. 0 critical gaps. |
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 3 | issues_open (folded) | 2026-09-01: HOLD_SCOPE — `cv_packs` decouple confirmed, doc demotion → Commit 0. |
+| Codex Review | `/codex review` | Independent 2nd opinion | 4 | issues_found (folded) | `codex exec` stalls on this repo every attempt (learning `codex-exec-stalls-cv-oci-confirmed`); Claude subagent runs the outside voice. Slice 5 run: 15 findings. |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 6 | issues_open (folded) | **2026-09-02 Slice 5:** 9 findings folded interactively (Flux-or-not, signing mechanism, Timoni generator + naming, semver ref, Flux scope, smoke dedup, sequencing, tests, provisioning); 15 outside-voice findings (7 structural challenges to the user mandates — presented, overruled on roadmap grounds; 8 concrete gaps folded); 1 critical gap flagged with mitigation in plan. Prior: 2026-09-01 SSOT-merge (9 + 15), 2026-09-02 Slice 4 (9, shipped). |
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | n/a (infra) |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
 
-- **CODEX:** `codex exec` stalls on this repo (learning `codex-exec-stalls-cv-oci-confirmed`, 5+ attempts). Claude subagent ran the outside voice.
-- **CROSS-MODEL:** the 2026-09-01 run converged on the reconstruction spine (CM-1-A superseded, Timoni cut, reconstruction as the organizing idea). The **2026-09-02 Slice 4 run** had two cross-model disagreements, both resolved by the user: (1) OpenBao timing — outside voice said it gates the distinctive Slices 5–6; user chose to split it out entirely into a standalone `cv_openbao` repo. (2) zot TLS mechanism — outside voice said a `bootstrap.sh` openssl block; user overrode → cert-manager + trust-manager (declarative, GitOps-native). The outside voice's other hits (pubkey-from-cluster bisect bug, the bogus OrbStack node-CA row, the cert-manager→PKI churn, P6/P10 overclaims, the compressed OpenBao bash) were applied as straight corrections.
-- **VERDICT (2026-09-02):** ENG REVIEW COMPLETE — Slice 4 re-spec'd, then
-  **SHIPPED**. OpenBao removed from cv_oci → `cv_openbao` (new repo, deferred).
-  Slice 4 = zot TLS (cert-manager) + Chains x509 signing + provenance materials
-  + `sigstore-bundle` + SBOM/verdict referrers. Commits `66048c2` (T1),
-  `6f8cb55` (T2/T8), `c63d6dc` (T3-defer), `fc1fd95` (T4/T5/T6). All verified:
-  e2e 21/21, negative 12/12, repro 3/3. P8/P9/P10 resolved. **Next: Slice 5**
-  (GitOps via `cv_gitops`; run **probe P5** first) → Slice 6 (`reconstruct.sh`).
-  T3 + a T4-followup (`APP_SOURCE_DIGEST`, `BUILDPACKS`, git-resolve,
-  PipelineRun-level provenance) carried as debt.
+- **CODEX:** `codex exec` stalls on this repo (5+ attempts, confirmed). The Claude subagent ran the Slice 5 outside voice.
+- **CROSS-MODEL (Slice 5, 2026-09-02):** the outside voice raised 7 structural objections to the tooling mandates — Timoni-now (contradicts the documented negative-space cut; `cue export` already covers CUE→YAML; Law of the Instrument formalized into policy), retiring the bash harness with no replacement (breaks "each slice lands green"), a declarative test tool being a poor fit for registry assertions (bash relocates into YAML `script:` leaves), and enlarging the Slice 6 reconstruction surface. **The user held all three mandates** (Timoni modules for config generation; no new bash including `bootstrap.sh`; retire the bash test harness for Chainsaw) on roadmap / direction grounds — knowledge the review does not have. Recorded, not re-litigated. The outside voice's 8 concrete gaps were folded: P11 split into P11a (can Flux verify a keyed/no-Rekor/self-signed-TLS cosign sig at all), P11b (does Chains sign a flux-artifact media type), P11c (bundle vs `.sig` tag); P13 (`timoni build` determinism); zot tag immutability as the real anti-rollback control; a dedicated `cv-sign-sa` instead of the deploy SA holding the key; `flux`/`timoni` CLI + push-RBAC + kustomize-controller PSA as unstated deps; the two async boundaries in acceptance.
+- **CRITICAL GAP (1, mitigation in plan):** if the sign step silently no-ops, `deploy` exits 0 and the cluster stays silently stale (Flux surfaces `Ready=False` only later, unwatched). Mitigation specified: `deploy` verifies its own artifact is signed + `cosign verify`-able before returning success; the Chainsaw suite asserts `OCIRepository` reaches `SourceVerified`.
+- **VERDICT (2026-09-02):** ENG REVIEW COMPLETE — Slice 5 re-spec'd. Three bisect-safe commits: **5a** Chainsaw adoption + delete the bash harness; **5b** `modules/web-app/` Timoni module + `deploy`/`smoke` render from it + probes P11a/b/c/P12/P13 live; **5c** `cv_oci/tofu/` OpenTofu provisions Flux + Secrets + CRs, `deploy` → `timoni build` → sign → `flux push artifact`, `OCIRepository` (`ref.semver`) + `spec.verify` + zot tag immutability. `bootstrap.sh` frozen. Then Slice 6 (`reconstruct.sh`). Decisions logged: `31278eb1` (Timoni + naming), `e48ba842` (Flux + probe-gated signing), `79ad1267` (P5 → OCI artifact, supersedes `ba9ed208`). ENG + CEO CLEARED — ready to implement 5a.
 
 NO UNRESOLVED DECISIONS

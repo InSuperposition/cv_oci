@@ -192,6 +192,35 @@ gives the same answer, independent of when you run it.
   ```
   A fresh `bootstrap.sh` run on an empty cluster has no conflict.
 
+### `fetch` fails: `Could not resolve host: github.com (Timeout while contacting DNS servers)`
+
+- **Symptom:** the `fetch` step (or a standalone `alpine/git` pod) fails
+  intermittently on DNS. `pipeline-acceptance` / `-pre-healthz` /
+  `build-is-reproducible` die at `fetch` or `build`. `pipeline-rejects-bad-ref`
+  still "passes" because it expects `fetch` to fail anyway.
+- **Root cause (investigated 2026-09-02):** NOT cv_oci. Host-side DNS was
+  intermittently failing — `curl -4 https://github.com` from the Mac itself
+  returned "Could not resolve host" then worked seconds later. The host ran ~10
+  VPN/tunnel interfaces (`utun0`-`utun8`, `ipsec0`) with default routes and
+  MTUs 1000-2000, plus IPv6-primary resolvers with shaky IPv6 (`ping6
+  <resolver>` → "No route to host"); the actual culprit turned out to be the
+  router. OrbStack's VM forwards pod DNS through `0.250.250.200` → the host
+  resolver, so it inherits any host flakiness. Worse in the ~15 min after any
+  OrbStack restart. The `fetch` task is byte-identical to when Slice 4's e2e
+  passed 21/21.
+- **Check:** from a pod, `dig +short A github.com @0.250.250.200` in a loop —
+  if it drops >10% it is this. From the Mac, `curl -4 -m5 https://github.com`
+  a few times.
+- **Fix (host / network, the real one):** the router; failing that, disconnect
+  the flaky VPN, set an explicit IPv4 resolver (`1.1.1.1` / `9.9.9.9`) in macOS
+  Network settings, or `sudo dscacheutil -flushcache && sudo killall -HUP
+  mDNSResponder`.
+- **Mitigation (in-repo):** the `fetch` step retries `git fetch` up to 5× with
+  backoff on transient network errors only (a bad ref still fails fast).
+  Absorbs a single blip; a sustained outage still fails.
+- **Do NOT** `bufsize 512` on CoreDNS — tried, does not help (the proxy drops
+  queries regardless of EDNS once degraded).
+
 ### A pipeline acceptance test fails at the first TaskRun with `serviceaccount ... not found`
 
 - **Likely cause:** the Chainsaw `apply` of `tests/_resources/pipeline-rbac.yaml`

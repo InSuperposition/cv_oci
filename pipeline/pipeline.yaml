@@ -80,7 +80,25 @@ spec:
               rm -rf app && mkdir app && cd app
               git init -q
               git remote add origin "$(params.repo)"
-              git fetch -q --depth 1 origin "$(params.sha)"
+              # `git fetch` is the only network call in this step. Retry it on
+              # TRANSIENT failures only — a single DNS/egress blip (macOS host
+              # resolver + VPN-tunnel MTU chaos on the dev cluster, see
+              # docs/runbook.md "fetch fails: Could not resolve host") must not
+              # fail a whole 20-minute pipeline run. A bad ref still fails fast.
+              n=0
+              while :; do
+                err="$(git fetch -q --depth 1 origin "$(params.sha)" 2>&1)" && break
+                case "$err" in
+                  *"Could not resolve host"*|*"Timeout"*|*"timed out"*|\
+                  *"unable to access"*|*"Connection refused"*|*"Connection reset"*)
+                    n=$((n + 1))
+                    [ "$n" -lt 5 ] || { echo "git fetch: transient failures x5, giving up: $err" >&2; exit 1; }
+                    echo "git fetch: transient failure, retry $n in $((n * 5))s: $err" >&2
+                    sleep $((n * 5)) ;;
+                  *)
+                    echo "git fetch failed (not transient): $err" >&2; exit 1 ;;
+                esac
+              done
               git checkout -q FETCH_HEAD
               got="$(git rev-parse HEAD)"
               echo "cv_frontend @ $got"

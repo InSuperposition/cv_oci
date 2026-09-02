@@ -617,9 +617,6 @@ user reshaped this slice:
   appears (TODO).
 - **The bash acceptance harness is retired.** `scripts/test/{e2e,negative,repro}.sh`
   are ported to **Chainsaw** (Kyverno's declarative K8s e2e tool) and deleted.
-  Registry / CLI assertions (is the artifact signed, does `cosign verify` pass,
-  is anon pull denied) land in Chainsaw `script:` leaves — that bash is
-  relocated into test YAML, not eliminated; accepted.
 
 The outside voice pushed back on all three (Law-of-the-Instrument risk;
 `cue export` already covers CUE→YAML; enlarges the Slice 6 reconstruction
@@ -627,6 +624,29 @@ surface; a declarative test tool is a poor fit for registry assertions). The
 mandates stand on roadmap / direction grounds; the concrete gaps it raised
 (probes P11a-c, P13, zot tag immutability, unstated RBAC deps) are folded in
 below.
+
+**Slice 5 re-architecture — PENDING A DEDICATED DESIGN PASS (2026-09-02).** A
+`/plan-eng-review` of the first 5a Chainsaw port (commit `8f2dfa2`) found the
+port leaned on `script:` shell for ~60% of its checks (the "bash relocated into
+YAML" the outside voice predicted). The user's direction: **declarative config
+is a project goal; use the stack to eliminate scripts.** Two decisions landed,
+the rest is deferred to a fresh design pass:
+- **`scripts/gen-digests.sh` → `digests_tool.cue`** (decision `f059f419`): a CUE
+  `_tool.cue` workflow (`cue cmd gen`, `tool/file.Create`, zero shell) fans
+  `digests.cue` out to `digests.env`, `params.yaml`, `tests/digests.json`
+  (Chainsaw `--values`), and later the tofu digest vars. Timoni modules import
+  `digests.cue` as a CUE package directly.
+- **Kyverno becomes a core plane** (decision `7e6275c3`): policy + admission
+  verification — `verifyImages` (cosign signature + SLSA/SBOM attestation, likely
+  reducing Flux `spec.verify` and retiring probes P11a/b/c on Flux),
+  pod-security (folding in Slice 1.7's PSA labels), `require-image-digest`,
+  `mutate` defaults, and `generate` per-namespace SAs+RBAC (removes the
+  `sed manifests/rbac.yaml` hack). Chainsaw tests policies directly
+  (apply violating resource → assert denied). Ripples into Slices 1.7 / 4 / 5c.
+- **Next:** `/office-hours` then `/plan-eng-review` on "Kyverno as cv_oci's
+  policy plane" — full tool-ownership map, seams, migration order, probes —
+  before implementing. The current `tests/` (commit `8f2dfa2`) is parked; it
+  will be substantially rewritten against Kyverno admission.
 
 **Sequencing — three independently-green, bisect-safe commits:**
 

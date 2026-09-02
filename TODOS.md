@@ -119,6 +119,25 @@ triggers) — this is new work not yet scheduled into a slice.
 - **Effort:** L.
 - **Depends on:** "Convert pipeline-infra to Timoni modules" above.
 
+### `cv_openbao` — transit signing + secrets, its own repo
+- **What:** a standalone project: OpenBao (`openbao-distroless` 2.6, raft
+  storage, static-key seal) providing (a) cosign transit signing for Tekton
+  Chains via `signers.kms` + `hashivault://cosign` + OIDC/JWT auth, (b)
+  OpenBao PKI as the zot cert issuer replacing the self-signed `ClusterIssuer`,
+  (c) Flux SOPS-via-transit for any `cv_gitops` secret.
+- **Why:** the KMS / KMS-backed-signing lesson, done right. cv_oci ships x509
+  signing (a K8s Secret + a `debt.md` row) until this exists.
+- **Context:** eng review 2026-09-02. Folding OpenBao into cv_oci as "Slice 4b"
+  was rejected — it is the least-original, most-stateful item in the
+  supply-chain space and would gate the distinctive Slices 5–6 (GitOps +
+  reconstruction capstone). One-concern-per-repo, like `cv_packs` / `cv_gitops`.
+  Research captured in `docs/designs/buildpacks-pivot.md` §`cv_openbao`. First
+  task there: live wire-up of Chains→OpenBao (P6 — OIDC discovery reachability,
+  sigstore health-endpoint probe, key-format skew).
+- **Effort:** L (own design doc, own bisect-safe history).
+- **Depends on:** cv_oci Slice 4 (x509 signing must exist to migrate from);
+  a persistent cluster (OrbStack PVs persist — confirmed).
+
 ### Crossplane for cloud infra
 - **What:** manage cloud resources (amd64 node pools, managed registries, DNS)
   declaratively via Crossplane.

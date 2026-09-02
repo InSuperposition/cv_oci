@@ -287,12 +287,12 @@ delete them when this merge lands.**
 | Slice 2 (determinism) | done (`30cd4c7`) | `scripts/test/repro.sh`. Root cause was `.git/` bleed-through in `fetch`, not the lifecycle. Byte-for-byte reproducible. Repro CronJob → TODOS.md. |
 | Slice 1.7 (PodSecurity) | **new, scoped below** | Open Question 3 — run `fetch` + `build` as uid 1000 + `fsGroup`, delete `prepare`'s root chown, go `restricted`. Small. |
 | Slice 3 (CVE gate + SBOM) | **re-spec'd below** | Trivy only — the reproducible CVE verdict (pinned DB) + an SBOM-presence test. No `syft`/`oras`; referrers move to Slice 4. zot NetworkPolicy **dropped** (non-goal). |
-| Slice 4 (Chains) | **re-spec'd below** | Sign + provenance + referrers. **No verify run / EventListener — CM-1-A superseded.** New: reproducible (content-addressable) provenance; `build` emits builder/run/buildpack digests (Decision 8); git-resolve the pipeline from GitHub (NOT gated by P4). Probes P8/P9/P10. |
+| Slice 4 (Chains) | **re-spec'd below** (eng review 2026-09-02) | zot TLS (cert-manager + trust-manager — Chains can't push to plain-HTTP) + Chains signing with the x509 key in `signing-secrets` + provenance authoring + `sigstore-bundle` referrers. **No verify run / EventListener — CM-1-A superseded.** Provenance: assert `subject` + materials-digests match, not the predicate digest (P8 fallback). |
 | Slice 5 (amd64 + multi-arch index) | **dropped** | Non-goal (Q2). Single platform digest is the release identity. Reference → non-goals. |
 | Slice 6 (promotion + zot authz) | **folded into Slice 5 (GitOps)** | Promotion is a git commit of a digest line in `cv_gitops` — no script, no authz. htpasswd + `dockerconfig` wiring land with the Flux pull credential. |
 | Slice 7 (Timoni + Flux GitOps) | **re-spec'd, renumbered Slice 5** | App deploy only, **no Timoni** (~40-line manifest). New repo `cv_gitops`; `deploy`'s tail `git push`es the digest; Flux `GitRepository` + `spec.verify`. Deterministic manifest generation. Probe P5. |
 | Slice 6 (reconstruction) — **new** | **scoped below** | The capstone: `reconstruct.sh <SHA>` rebuilds image + SBOM + verdict + provenance + manifest and asserts every digest matches deployed state. Replaces the superseded verify-run's "materials assertion". |
-| OpenBao slice | **not a planned slice** | Trust-root cutover breaks bisect-green (finding H). Noted as its own arc, gated on P6. |
+| OpenBao slice | **standalone `cv_openbao` repo** (eng review 2026-09-02) | Was going to fold in as "4b"; the outside voice was right that it is the least-original, most-stateful item and it gates the distinctive Slices 5–6. Own repo, like `cv_packs` / `cv_gitops`. cv_oci keeps x509 signing + the debt row. Research (raft, static seal, `hashivault://` + OIDC/JWT) captured in the §`cv_openbao` block below. |
 | `plan/` reference (rules, glossary, test layers) | **merged below** | "Reference" section, CNB-updated. Crane/apko-era layers + the NetworkPolicy + the multi-run verify design dropped. |
 
 ### The supply-chain slices (CNB-era spec)
@@ -397,8 +397,8 @@ One new tool: **`trivy`** (one image, pinned in `digests.cue`, one row in
 **CVE gate.** A `scan` step between `build` and `smoke` — `smoke`/`deploy` only
 run if it passes.
 
-- `trivy image` the built digest (plain-HTTP zot — `TRIVY_INSECURE=true`).
-  Trivy **consumes**, never authors.
+- `trivy image` the built digest (`--insecure` while zot is plain-HTTP; drops to
+  a CA-trust mount once Slice 4 gives zot TLS). Trivy **consumes**, never authors.
 - Policy = "fixable CRITICAL as of now": fail on a currently-fixable CRITICAL, no
   baseline ledger.
 - **Also scans the run image** (`heroku/heroku:24`, Q1).
@@ -437,20 +437,58 @@ the 3 new assertions), `negative.sh` (12/12, incl. the CVE-gate case),
 
 #### Slice 4 — Chains: sign + reproducible provenance + referrers
 
+**Eng review 2026-09-02.** Chains cannot push attestations to the plain-HTTP zot
+(`http: server gave HTTP response to HTTPS client`; `storage.oci.repository.insecure`
+does not cover the store-alongside-image path — probed live). The blocker is
+**registry transport**, orthogonal to where the signing key lives. So Slice 4:
+zot gets TLS, and Chains signs with the cosign key in `signing-secrets` (x509).
+**OpenBao / transit signing is out of this repo** — it moves to a standalone
+`cv_openbao` project (see below), the way `cv_packs` and `cv_gitops` are separate.
+cv_oci ships x509 signing permanently with the `debt.md` row.
+
 No verify task, no verify run, no EventListener (CM-1-A superseded). Chains signs
 asynchronously after the PipelineRun completes; `deploy` keeps doing
 `kubectl apply` in this slice, unchanged.
+
+**zot gets TLS — declaratively (cert-manager + trust-manager, GitOps-native).**
+No imperative cert script. `manifests/` gains:
+- a **cert-manager** self-signed `ClusterIssuer` + a `Certificate` for
+  `zot.cv-pipeline.svc.cluster.local` (auto-renewed);
+- the zot `Deployment` mounts the issued cert Secret; `configmap.yaml` gets an
+  `http.tls` block pointing at it;
+- **trust-manager** publishes the CA bundle as a `Bundle` → a ConfigMap in
+  `cv-pipeline` + `tekton-chains`, so every consumer trusts it without a
+  committed `ca.crt` or hand-maintained mounts.
+
+These are plain manifests: `kubectl apply -f manifests/` at bootstrap now,
+reconciled by Flux from Slice 5. Registry clients:
+
+| Client | today | Slice 4 |
+|---|---|---|
+| Tekton Chains controller | **fails** (HTTPS-only client, no insecure knob) | trust-manager CA ConfigMap mounted into its trust store — the one hard requirement |
+| lifecycle `create`, trivy `scan` | `--insecure` / `CNB_INSECURE_REGISTRIES` | mount the CA ConfigMap (YAML anchor, like `&restricted-sc`); drop the insecure flags |
+| host `crane` / `oras` / `cosign` | `--insecure` | `SSL_CERT_FILE` → the exported CA, or keep `--insecure` (host-only, low stakes) |
+| OrbStack node (kubelet pull) | `docker.json` insecure-registries | **unchanged** — `insecure-registries` already means "accept an unverified TLS cert for this host", so self-signed TLS zot needs zero node changes |
+
+**Chains config (kept from the probe run):** `artifacts.{pipelinerun,taskrun}.format
+= slsa/v2alpha4`, `storage = oci`, `storage.oci.encoding-format = sigstore-bundle`
+(→ OCI 1.1 Referrers API — P9 resolved), `transparency.enabled = false` (no Rekor),
+`builddefinition.buildtype = slsa` (strict predicate, fewer per-run Tekton
+internalParameters than `slsa-tekton`). Signer = `x509`, cosign key in
+`signing-secrets` (`tekton-chains` ns), generated once by bootstrap **only if
+absent** — never regenerated. **The acceptance tests read the public key from
+the live cluster** (`cosign public-key --key k8s://tekton-chains/signing-secrets`),
+never a committed file, so a re-bootstrap on a bisected checkout can't stale it.
+`bootstrap.sh` installs Chains (v0.29.0, pinned) + cert-manager + trust-manager.
 
 **Provenance authoring (Decision 8 — real task work).** The `build` task emits, as
 typed results, the whole input closure so the SLSA predicate names it:
 
 - `BUILDER_IMAGE_DIGEST`, `RUN_IMAGE_DIGEST` — from `/layers/report.toml` + the
-  pinned builder param. **Fix first (eng-review finding E):**
-  `tasks/buildpacks.yaml:198` does `grep "digest" report.toml | cut -d'"' -f2` —
-  `report.toml` can carry multiple `digest` keys (`[image]`, `[run-image]`); the
-  `grep` takes the first, and a lifecycle schema change would silently yield the
-  wrong digest with every downstream check still passing. Parse the specific TOML
-  key, not the first `digest` line.
+  pinned builder param. The `report.toml` digest-parse bug (eng-review finding E)
+  is **already fixed** — `a191de8` (T1): section-aware awk on `[image]`,
+  `scripts/test/report-digest.bats`. `RUN_IMAGE_DIGEST` comes from the pinned
+  `run-image` param, not `report.toml` (there is no `[run-image]` table).
 - `BUILDPACKS` — id\@version list from `io.buildpacks.build.metadata`.
 - `APP_SOURCE_DIGEST` — `cv_frontend@<full-sha>` (known in `fetch`).
 - `*_ARTIFACT_INPUTS` type hints so Chains records them as materials.
@@ -465,33 +503,70 @@ Tekton **git** resolver (already enabled, `bootstrap.sh` phase 2), pulling
 `pipeline.yaml` from **GitHub**. Needs only the repo pushed to a reachable remote
 — **not gated on P4** (P4 is the separate *bundles* resolver, a later nicety).
 
-**Reproducible provenance (the determinism + innovation angle).** Two
-byte-identical builds of one SHA (proven in Slice 2) do NOT produce identical
-provenance by default — the predicate embeds build start/end time and the run
-UID. **Normalize those fields** (or configure Chains to omit them) so the
-predicate itself is content-addressable. `repro.sh` extends: build twice, assert
-identical provenance digest. **Probe first** — Chains may not expose enough
-control over the predicate; fall back to "provenance records the inputs but is
-not itself content-addressed" and note the gap.
+**Reproducible provenance — accept the documented fallback (P8 resolved).** Two
+byte-identical builds of one SHA (Slice 2) do NOT produce an identical provenance
+*predicate* — `slsa/v2alpha4` embeds `startedOn` / `finishedOn` and the
+PipelineRun UID, and Chains exposes no normalize knob. So the determinism claim
+is scoped: **`repro.sh` asserts the predicate's `subject` + the *digests* in
+`resolvedDependencies` match across two builds**, not the whole predicate digest.
+**First 4-task: dump a real predicate and confirm `resolvedDependencies` entries
+are digest-only** — if they carry per-run URIs or fetch timestamps, the materials
+assertion also drifts and the determinism story needs re-scoping to `subject`
+only. `buildtype: slsa` (strict) keeps the predicate as small as Chains allows.
 
-**Build run.** Install Chains observe-only first (pipeline stays green). Config:
-`artifacts.pipelinerun.format=slsa/v2alpha4`, `storage=oci`, cosign key in the
-`signing-secrets` Secret (`tekton-chains` ns), no Rekor.
-**Probe (eng-review finding D):** cosign no-Rekor verify against a Chains
-`sigstore-bundle` is version-sensitive (RFC3161 timestamp flags, predicate-type
-URI). Confirm the exact `cosign verify` / `verify-attestation` invocation before
-relying on it.
-**Probe (eng-review finding B):** Chains `storage: oci` uses the tag scheme
-(`sha256-<digest>.sig` / `.att`) by default, **not** the OCI 1.1 referrers API.
-`oras discover` finds nothing unless Chains is configured for referrers. Pick one
-and make the SBOM/verdict referrers match.
+**Referrers — `sigstore-bundle` (P9 resolved).** `storage.oci.encoding-format
+= sigstore-bundle` makes Chains write via the **OCI 1.1 Referrers API** (not the
+`sha256-<digest>.sig` tag scheme). `oras discover` sees them. The SBOM and
+CVE-verdict records (Slice 3) attach the same way — the `scan` step, or a small
+`referrers` step after `scan`, `oras attach`es `sbom.cdx.json` +
+`cve-verdict.json` to the app digest. All three referrers discoverable by
+`oras discover`.
 
-**Referrers.** With the key present, attach as referrers to the app digest:
-the SLSA provenance (Chains), the CycloneDX SBOM, the CVE-verdict record.
+**cosign verify with no Rekor (P10 — confirm early in Slice 4).** Expected form:
+`cosign verify-attestation --key <pub> --type slsaprovenance
+--insecure-ignore-tlog=true <digest>` (and `cosign verify` for the image
+signature), `--insecure-ignore-tlog` because `transparency.enabled=false`. The
+probe run got as far as Chains **failing** to push to the plain-HTTP zot — no
+signature landed, so the exact flags for a `sigstore-bundle` (RFC3161 timestamp
+handling, predicate-type URI) are confirmed only once the TLS work lets the push
+succeed. cosign v3.1.3 (host).
 
-**Acceptance:** `cosign verify` + `cosign verify-attestation` pass; a tampered
-image fails; `repro.sh` asserts identical provenance digest (or the fallback gap
-is documented); referrers are discoverable by the chosen scheme; bisect-safe.
+**Acceptance:** `cosign verify` + `cosign verify-attestation` pass on the built
+digest (public key read from the live cluster); a `crane`-tampered copy fails;
+`oras discover` lists the SLSA provenance + SBOM + CVE-verdict referrers;
+`repro.sh` asserts matching `subject` + materials-digests across two builds;
+`bisect-safe` (re-bootstrap keeps the existing `signing-secrets` key). `e2e.sh`
+waits for `chains.tekton.dev/signed=true` (async, ~30–60s) before the verify
+assertions.
+
+#### `cv_openbao` — transit signing, its own repo (eng review 2026-09-02)
+
+The KMS lesson (move the cosign key from a K8s Secret to OpenBao transit) is a
+standalone project, not a cv_oci slice. Rationale: it is the least-original,
+most-stateful item in the space, it would sit directly in front of the
+distinctive Slices 5–6 (GitOps + reconstruction), and one-concern-per-repo
+matches `cv_frontend` / `cv_packs` / `cv_gitops`. cv_oci keeps x509 signing with
+the `debt.md` row.
+
+When `cv_openbao` is built, the design already researched:
+- **OpenBao** `openbao-distroless` 2.6.x, **integrated raft** on a persistent
+  local-path PVC (OrbStack PVs survive `orb restart` — verified).
+- **`seal "static"`** — software-only auto-unseal, seal key in a K8s Secret
+  referenced `file://`, `current_key`/`previous_key` for rotation. No unseal
+  Job/sidecar. The 2.6 auto-unseal *plugin* system still needs an external KMS
+  binary — rejected.
+- **Transit** key `cosign`, `ecdsa-p256`. Rotation: `transit/keys/cosign/rotate`
+  (versioned; verify spans all versions).
+- **Chains → OpenBao auth: OIDC/JWT via the controller SA token** —
+  `signers.kms.kmsref = hashivault://cosign` (sigstore's provider works against
+  OpenBao's `/v1/transit/*`), `signers.kms.auth.oidc.{path,role}`, no static
+  token. **Provisionally resolved — the first `cv_openbao` task is a live wire-up**
+  (OIDC discovery reachable from the OpenBao pod? sigstore health-endpoint
+  probe? Chains' bundled sigstore vs cosign v3 key-format skew?).
+- OpenBao **PKI** can later replace the self-signed `ClusterIssuer` for zot — a
+  `cv_openbao` concern, not churn inside cv_oci.
+- Flux SOPS-via-transit (v2.9+, SA-token auth, no on-disk key) for any
+  `cv_gitops` secret — also `cv_openbao`.
 
 #### Slice 5 — reproducible deployed state (GitOps via a new `cv_gitops` repo)
 
@@ -522,9 +597,13 @@ of any rebuild path). If a human gate is ever wanted: a `release` branch Flux
 watches, and promotion is `git cherry-pick`.
 
 **zot auth.** htpasswd — anonymous pull denied, one CI credential wired through
-the `build` task's `dockerconfig` workspace + a Flux `imagePullSecret`. Still
-plain-HTTP on the solo cluster; htpasswd-over-HTTP puts Basic-auth creds on the
-wire in the clear — TLS mandatory at any non-loopback hop (`debt.md`).
+the `build` task's `dockerconfig` workspace + a Flux `imagePullSecret`. zot is
+**already TLS** as of Slice 4, so Basic-auth creds are not on the wire in the
+clear. The htpasswd + the two `dockerconfigjson` Secrets are generated by
+`bootstrap.sh` (idempotent, only if absent) — plain K8s Secrets, **not** SOPS,
+**not** a file. Once `cv_openbao` exists, they move to an OpenBao `kv` entry
+synced by the OpenBao Secrets Operator; until then a K8s Secret is the honest
+trust level (debt row).
 
 **Flux.** A `GitRepository` watches `cv_gitops`; a `Kustomization` applies the
 `cv` manifest; the image is pulled from zot by digest;
@@ -539,10 +618,12 @@ attestations? bounded retry?).
 the trust anchor is the cosign-signed *image digest* the manifest references, not
 the commit. Avoids another in-cluster signing key with no KMS story.
 
-**Environment note (eng-review finding N):** the "manual `kubectl edit` is
-reverted by Flux" acceptance test needs a cluster that stays up. OrbStack is torn
-down between sessions (same gap as the repro CronJob) — this test runs when a
-persistent cluster exists, or on a `kind` cluster held up for the test.
+**Environment note (eng-review finding N — corrected 2026-09-02):** the OrbStack
+cluster and its `local-path` PVs **persist** across `orb restart` (verified:
+`cv-pipeline` + zot PVC survived days of multi-session work). Only the throwaway
+`cv-e2e-*` / `cv-repro-*` test namespaces are ephemeral. So the "manual `kubectl
+edit` is reverted by Flux" test and the repro CronJob run fine on the live
+cluster; the earlier "torn down between sessions" note was wrong.
 
 **Acceptance:** the deploy `git push` lands in `cv_gitops`; regenerating the
 manifest is byte-identical; Flux reconciles `cv` to the pushed digest; `cosign
@@ -557,8 +638,8 @@ The payoff of the spine. A check that, given **only** `cv_frontend@SHA` and
 - rebuilds the image (Slice 2 → identical app-layer + outer digest),
 - rebuilds / re-reads the SBOM (identical `sbom.sha`),
 - re-runs the CVE scan at the pinned DB digest (identical verdict),
-- rebuilds the provenance (identical predicate digest, if Slice 4's normalization
-  held),
+- rebuilds the provenance and asserts its `subject` + `resolvedDependencies`
+  match (the predicate is not itself content-addressed — P8 fallback),
 - regenerates the `cv_gitops` manifest (identical bytes),
 - asserts every digest matches what is currently deployed.
 
@@ -571,27 +652,17 @@ the superseded verify-run design with something concrete and testable.
 the deployed state; a deliberately-tampered deployed digest makes it exit non-zero
 with the specific mismatch named.
 
-#### OpenBao — noted, not a planned slice
-
-The natural next lesson (persistent OpenBao, transit signing, `hashivault://`
-KMS URI for Chains) is its own arc. Deliberately not scheduled here: migrating
-the cosign key from a K8s Secret to transit changes the trust root, so
-`cosign verify` on every pre-migration release fails afterward — a `git bisect`
-across that commit cannot stay green without a re-sign / trust-transition story
-(eng-review finding H). Do it as a standalone project with that story worked out,
-gated on **probe P6** (Chains + sigstore `hashivault://` against OpenBao).
-
 #### Probes still open (run before the slice each gates)
 
-| Probe | Question | Gates |
-|---|---|---|
-| **P4** | Can the Tekton **bundles** resolver pull task/pipeline bundles from plain-HTTP zot? (The **git** resolver is separate, already enabled, pulls from GitHub — NOT gated by P4.) | a later optional "tasks as OCI bundles" nicety — nothing in Slices 3–6 depends on it |
-| **P5** | Flux `GitRepository.spec.verify` exact scope on a git source — the commit only, or the referenced image? attestations? bounded retry/failure? | Slice 5 |
-| **P8** | Chains predicate control — can the `slsa/v2alpha4` predicate's build start/end time + run UID be normalized or omitted, so two builds of one SHA produce an identical provenance digest? | Slice 4 reproducible provenance (fall back to "records inputs, not content-addressed") |
-| **P9** | Chains `storage: oci` — tag scheme (`sha256-<digest>.sig`/`.att`) or the OCI 1.1 referrers API? Which does `oras discover` / `cosign download` see? | Slice 4 referrer layout (SBOM + CVE-verdict must match) |
-| **P10** | The exact `cosign verify` / `verify-attestation` invocation for a Chains `sigstore-bundle` with **no Rekor** — timestamp flags, predicate-type URI. | Slice 4 verify + Slice 5 Flux `spec.verify` |
-| **P6** | Tekton Chains + sigstore `hashivault://` against OpenBao — works? K8s auth or static token? | the OpenBao arc (not a planned slice) |
-| **P7** | Flagger meshless (`provider: kubernetes`) — any metric signal without a mesh? does `cv_frontend` need `/metrics`? | a possible progressive-delivery slice, not yet planned |
+| Probe | Question | Gates | Status |
+|---|---|---|---|
+| **P4** | Can the Tekton **bundles** resolver pull task/pipeline bundles from plain-HTTP zot? | a later "tasks as OCI bundles" nicety — nothing in Slices 3–6 depends on it | open (moot once zot is TLS in Slice 4) |
+| **P5** | Flux `GitRepository.spec.verify` exact scope on a git source — commit only, or the referenced image? attestations? bounded retry? | Slice 5 | open — run before Slice 5 |
+| **P6** | Chains + sigstore `hashivault://` against OpenBao — scheme? auth? | `cv_openbao` (separate repo) | provisionally resolved (docs): `hashivault://` should work against OpenBao; auth = OIDC/JWT via the Chains SA token. Live wire-up is `cv_openbao`'s first task. |
+| **P8** | Can the `slsa/v2alpha4` predicate's timestamps + run UID be normalized so two builds give an identical provenance digest? | Slice 4 reproducible provenance | **RESOLVED** — no. Chains has no knob. Fallback: assert `subject` + materials-digests match, not the predicate digest — after confirming `resolvedDependencies` entries are digest-only. |
+| **P9** | Chains `storage: oci` — tag scheme or OCI 1.1 Referrers API? | Slice 4 referrer layout | **RESOLVED** — `storage.oci.encoding-format: sigstore-bundle` → Referrers API; `oras discover` sees them. |
+| **P10** | Exact `cosign verify` / `verify-attestation` invocation for a Chains `sigstore-bundle`, no Rekor. | Slice 4 verify + Slice 5 `spec.verify` | partial — expected form known (`--insecure-ignore-tlog=true`, `--type slsaprovenance`); confirm once Slice 4's TLS lets a signature land in zot. |
+| **P7** | Flagger meshless (`provider: kubernetes`) — metric signal without a mesh? | a possible progressive-delivery slice, not yet planned | open |
 
 P1/P2/P3 (regctl assembly, `docker load`, zot two-address) are **dead** — the
 crane/apko assembly path they gated no longer exists, and the zot address
@@ -635,7 +706,8 @@ question was settled by the OrbStack service-DNS finding.
 | Standalone promotion slice | Folded into Slice 5 (GitOps). Promotion is a git commit of a digest line in `cv_gitops` — no script, no pipeline, no candidate/release authz. `main` ships every verified build; a `release` branch + `git cherry-pick` if a gate is ever wanted. | never (this is the shape) |
 | Separate verify+deploy PipelineRun (CM-1-A) | Superseded. It solved "verify a signature you didn't produce"; on a single-actor cluster that is negative space. Verification = Flux `spec.verify` (one boundary) + the Slice 6 reconstruction check. | a real external consumer of the signed artifact appears |
 | Timoni for the app deploy | ~40-line manifest, one service; `timoni build` is for many-service / many-env. | stays in the pipeline-infra TODO (20+ Tekton resources) |
-| OpenBao / KMS signing | Trust-root cutover breaks bisect-green (finding H); its own arc with a re-sign story. | you want the KMS lesson — as a standalone project, gated on P6 |
+| OpenBao / transit signing / SOPS / PKI in **cv_oci** | These are `cv_openbao`'s concern — a standalone repo (§`cv_openbao`). cv_oci ships x509 signing + the debt row. Folding a stateful secrets service in front of Slices 5–6 (the distinctive material) is the gold-plating the 2026-09-02 eng review cut. | never in cv_oci; build `cv_openbao` when you want the KMS lesson |
+| SOPS as a tool anywhere | No encrypted secret exists yet. `bootstrap.sh` generates the K8s Secrets it needs (idempotent, only-if-absent). Adding SOPS for zero secrets is negative space. | `cv_gitops` grows a real encrypted value → `cv_openbao`'s Flux-SOPS-via-transit |
 
 ### Component boundaries (CNB)
 
@@ -946,13 +1018,19 @@ is one address (OrbStack service DNS + daemon `insecure-registries`).**
      task between `build` and `smoke`; digest-pinned trivy image + vuln-DB →
      reproducible verdict; trivy-authored CycloneDX SBOM (heroku emits none).
      `e2e`/`negative`/`repro` green under `restricted`.
-   - **next: Slice 4** (Chains: sign + reproducible provenance + referrers;
-     probes P8/P9/P10). The T1 report.toml parse fix it depended on is already
-     in (`a191de8`). → **Slice 5** (GitOps via `cv_gitops`; probe P5) →
-     **Slice 6** (`reconstruct.sh` capstone).
-6. **`packs` project** — separate, later, its own design doc.
+   - **next: Slice 4** (zot TLS via cert-manager + trust-manager, declarative;
+     Chains signing with the x509 key already in `signing-secrets`; provenance
+     authoring; referrers via `sigstore-bundle`). Chains v0.29 + config are
+     already applied from the probe run — Slice 4 adds the TLS that lets the
+     push succeed. P8/P9 resolved, P10 partial. **OpenBao is not in this repo.**
+   - → **Slice 5** (GitOps via `cv_gitops`; probe P5; htpasswd = a K8s Secret) →
+     **Slice 6** (`reconstruct.sh` capstone — the distinctive payoff).
+6. **`cv_packs` project** — separate, later, its own design doc.
 7. **`cv_gitops` project** — new repo, created when Slice 5 starts, its own
    design doc (like `cv_packs`).
+8. **`cv_openbao` project** — transit signing + Flux SOPS-via-transit + PKI.
+   Own repo, own design doc; cv_oci ships x509 signing (debt row) until then.
+   Research captured in the §`cv_openbao` block above.
 
 ## What I noticed about how you think
 
@@ -972,8 +1050,46 @@ is one address (OrbStack service DNS + daemon `insecure-registries`).**
 
 ## Implementation Tasks
 
-Synthesized from the 2026-09-01 SSOT-merge eng review. Each derives from a
-specific finding. JSONL: `~/.gstack/projects/InSuperposition-cv_oci/tasks-eng-review-20260901-213425.jsonl`.
+### Slice 4 — from the 2026-09-02 eng review
+
+JSONL: `~/.gstack/projects/InSuperposition-cv_oci/tasks-eng-review-20260902-110518.jsonl`.
+T1–T3 are P1 (the transport fix + signing land together); do T8 alongside T1.
+
+- [ ] **T1 (P1, human ~3h / CC ~30min)** — `manifests/cert-manager/` + `manifests/zot/` +
+  `bootstrap.sh` — zot TLS declaratively: self-signed `ClusterIssuer` + `Certificate`
+  for `zot.cv-pipeline.svc.cluster.local`, trust-manager `Bundle` → CA ConfigMap in
+  `cv-pipeline` + `tekton-chains`; zot `Deployment` mounts the cert Secret; `http.tls`
+  block. bootstrap installs cert-manager + trust-manager (pinned). Verify: `openssl
+  s_client` to `zot:5000` shows the cert; kubelet still pulls (existing
+  `insecure-registries` covers self-signed).
+- [ ] **T2 (P1, human ~1h / CC ~15min)** — `tekton-chains` — mount the trust-manager
+  CA ConfigMap into the chains-controller trust store. Verify: a build's
+  `chains.tekton.dev/signed` annotation flips to `true` (was `failed`).
+- [ ] **T3 (P1, human ~2h / CC ~20min)** — `pipeline/pipeline.yaml` + `tasks/buildpacks.yaml`
+  — lifecycle `create` + trivy `scan` mount the CA ConfigMap via one YAML anchor;
+  drop `CNB_INSECURE_REGISTRIES` + trivy `--insecure`. Verify: `e2e.sh` green.
+- [ ] **T4 (P1, human ~4h / CC ~40min)** — `tasks/buildpacks.yaml` + `pipeline/pipeline.yaml`
+  — provenance authoring (Decision 8): emit `BUILDER_IMAGE_DIGEST` / `RUN_IMAGE_DIGEST`
+  / `BUILDPACKS` / `APP_SOURCE_DIGEST` as typed results + `*_ARTIFACT_INPUTS` hints;
+  git-resolve `pipeline.yaml` from GitHub. Verify: the SLSA predicate names them.
+- [ ] **T5 (P2, human ~2h / CC ~20min)** — `pipeline/pipeline.yaml` + `digests.cue` —
+  `oras attach` `sbom.cdx.json` + `cve-verdict.json` to the app digest (pinned oras
+  image, uid 1000, CA-trust). Verify: `oras discover` lists 3 referrers.
+- [ ] **T6 (P1, human ~3h / CC ~30min)** — `scripts/test/{e2e,negative,repro}.sh` —
+  `e2e.sh` waits for `signed=true` then `cosign verify` + `cosign verify-attestation`
+  (pubkey from `k8s://tekton-chains/signing-secrets`, **not** a file); `oras discover`
+  = 3; `negative.sh` `crane`-tamper → verify fails; `repro.sh` predicate `subject` +
+  materials-digests match across 2 builds.
+- [ ] **T7 (P2, human ~1h / CC ~15min)** — dump a real `slsa/v2alpha4` predicate;
+  confirm `resolvedDependencies` are digest-only (else re-scope `repro.sh` to
+  `subject`); confirm the exact no-Rekor `cosign verify-attestation` flags (P10).
+- [ ] **T8 (P2, human ~30min / CC ~10min)** — `bootstrap.sh` generates the
+  `signing-secrets` cosign key **only if absent** — never regenerate (bisect safety,
+  outside voice #2).
+
+### Prior — 2026-09-01 SSOT-merge eng review (T1–T4 all shipped)
+
+JSONL: `~/.gstack/projects/InSuperposition-cv_oci/tasks-eng-review-20260901-213425.jsonl`.
 
 - [ ] **T1 (P2, human: ~30min / CC: ~5min)** — `tasks/buildpacks.yaml` — parse the
   keyed run-image digest from `report.toml`, not the first `digest` line.
@@ -1011,12 +1127,12 @@ specific finding. JSONL: `~/.gstack/projects/InSuperposition-cv_oci/tasks-eng-re
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 3 | issues_open (folded) | 2026-09-01: HOLD_SCOPE — `cv_packs` decouple confirmed, doc demotion → Commit 0. Graded the pivot plan. |
 | Codex Review | `/codex review` | Independent 2nd opinion | 3 | issues_found (folded) | `codex exec` stalls on this repo every attempt (logged); Claude subagent ran all three. This run: 15 findings on the SSOT-merge back half. |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 4 | issues_open (folded) | 2026-09-01 SSOT-merge run: 9 findings + 15 outside-voice findings, all folded. 0 critical gaps. 13 AUQ decisions. Back half re-architected around verification-by-reconstruction; CM-1-A superseded. |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 5 | issues_open (folded) | 2026-09-01 SSOT-merge: 9 + 15 outside-voice findings, reconstruction spine. **2026-09-02 Slice 4:** blocker probed live (Chains can't push to plain-HTTP zot); OpenBao split off to `cv_openbao`; zot TLS via cert-manager + trust-manager; 9 outside-voice findings (2 cross-model tensions → user, 7 corrections applied); 8 tasks. 0 critical gaps. |
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | n/a (infra) |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
 
-- **CODEX:** `codex exec` stalled again (learning `codex-exec-stalls-cv-oci-confirmed`, 4+ attempts). Claude subagent outside voice ran instead — 15 findings, the sharpest being that the doc-under-review still described the superseded slice plan (now fixed) and that the two-run verify design (CM-1-A) is machinery for a downstream-consumer problem this cluster doesn't have.
-- **CROSS-MODEL:** the outside voice and the interactive review converged — both landed on "sculpt the back half, the reconstruction check replaces the materials assertion." The user's three steers (separation of concerns → negative space → determinism + innovation) drove the final shape: CM-1-A superseded, Timoni cut from the app deploy, OpenBao de-scheduled, and the reconstruction spine adopted as the organizing idea.
-- **VERDICT:** ENG REVIEW COMPLETE — plan revised. Not "clean" (T1 is a real latent bug in shipped code; T2 sharpens Slice 1.7). Slices 1.5 + 2 shipped (`d956572`, `30cd4c7`). Ready to implement: T1/T2, then Slice 1.7 → 3 → 4 → 5 → 6. `pipeline-restructure.md` + `pipeline-gitops-replan.md` are fully absorbed — delete (T3). Design review not required (infra). Probes P5/P8/P9/P10 are Slice-time prerequisites, spec'd in the probe table — run each before its slice.
+- **CODEX:** `codex exec` stalls on this repo (learning `codex-exec-stalls-cv-oci-confirmed`, 5+ attempts). Claude subagent ran the outside voice.
+- **CROSS-MODEL:** the 2026-09-01 run converged on the reconstruction spine (CM-1-A superseded, Timoni cut, reconstruction as the organizing idea). The **2026-09-02 Slice 4 run** had two cross-model disagreements, both resolved by the user: (1) OpenBao timing — outside voice said it gates the distinctive Slices 5–6; user chose to split it out entirely into a standalone `cv_openbao` repo. (2) zot TLS mechanism — outside voice said a `bootstrap.sh` openssl block; user overrode → cert-manager + trust-manager (declarative, GitOps-native). The outside voice's other hits (pubkey-from-cluster bisect bug, the bogus OrbStack node-CA row, the cert-manager→PKI churn, P6/P10 overclaims, the compressed OpenBao bash) were applied as straight corrections.
+- **VERDICT (2026-09-02):** ENG REVIEW COMPLETE — Slice 4 re-spec'd. OpenBao removed from cv_oci → `cv_openbao` (new repo, deferred). Slice 4 = zot TLS (cert-manager + trust-manager) + Chains x509 signing + provenance authoring + `sigstore-bundle` referrers. Next: Slice 4 → 5 → 6. Probe P5 before Slice 5; P10 + predicate-shape check early in Slice 4. Tasks T1–T8 in `~/.gstack/projects/InSuperposition-cv_oci/tasks-eng-review-20260902-110518.jsonl`.
 
 NO UNRESOLVED DECISIONS

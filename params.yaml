@@ -16,6 +16,9 @@ params:
   - name: cnbUtilityImage-digest
     type: string
     default: "sha256:b208215a4655538be652b2769d82e576bc4d0a2bb132144c060efc5be8c3f5d6"
+  - name: orasCli-digest
+    type: string
+    default: "sha256:c4d59cab4aa6d6cfb8e3c31b571f5af5086004f3fe28700b844a14660bf0c9c4"
   - name: trivyCli-digest
     type: string
     default: "sha256:55ad20f8a239a3e95427e60b8aaea38788550c18a3f1772976bebf732e6ae166"

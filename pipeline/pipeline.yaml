@@ -28,6 +28,7 @@ spec:
     # trivy-db: bare sha256 digest of ghcr.io/aquasecurity/trivy-db:2 (Slice 3).
     # Pinned so the CVE verdict is reproducible.
     - { name: trivy-db, type: string }
+    - { name: oras-image, type: string }
     - { name: frontend-repo, type: string }
     - { name: frontend-ref, type: string }
     - { name: app-repo, type: string, default: "zot.cv-pipeline.svc.cluster.local:5000/cv" }
@@ -129,8 +130,9 @@ spec:
         - { name: run-image, value: "$(params.run-image)" }
         - { name: trivy-image, value: "$(params.trivy-image)" }
         - { name: trivy-db, value: "$(params.trivy-db)" }
+        - { name: oras-image, value: "$(params.oras-image)" }
       taskSpec:
-        params: [{ name: app-ref }, { name: app-digest }, { name: run-image }, { name: trivy-image }, { name: trivy-db }]
+        params: [{ name: app-ref }, { name: app-digest }, { name: run-image }, { name: trivy-image }, { name: trivy-db }, { name: oras-image }]
         workspaces: [{ name: source }]
         results:
           - { name: VERDICT, description: "pass | fail-critical" }
@@ -218,6 +220,27 @@ spec:
               [ "$sbom_check" = ok ]    || { echo "SBOM check: $sbom_check" >&2; fail=1; }
               [ "$comp_count" -ge 20 ]  || { echo "SBOM check: only $comp_count components" >&2; fail=1; }
               exit $fail
+          # Slice 4 (T5): attach the SBOM + CVE-verdict as OCI 1.1 referrers to
+          # the app digest — same discovery path as the Chains SLSA provenance.
+          # Only runs if the scan step above passed (Tekton skips on failure).
+          - name: referrers
+            image: $(params.oras-image)
+            securityContext: *restricted-sc  # Slice 1.7
+            script: |
+              #!/bin/sh
+              set -eu
+              REF="$(params.app-ref)"
+              export ORAS_CACHE="$(workspaces.source.path)/.orascache"
+              mkdir -p "$ORAS_CACHE"
+              cd "$(workspaces.source.path)"   # oras attach rejects absolute file args
+              oras attach --insecure --distribution-spec v1.1-referrers-api \
+                --artifact-type application/vnd.cyclonedx+json \
+                "$REF" sbom.cdx.json:application/vnd.cyclonedx+json
+              oras attach --insecure --distribution-spec v1.1-referrers-api \
+                --artifact-type application/vnd.cv-oci.cve-verdict.v1+json \
+                "$REF" cve-verdict.json:application/json
+              echo "referrers attached to $REF:"
+              oras discover --insecure --format tree "$REF"
 
     - name: smoke
       runAfter: [scan]

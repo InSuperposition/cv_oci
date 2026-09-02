@@ -11,15 +11,16 @@
 #   scripts/test/e2e.sh          happy path
 #   scripts/test/e2e.sh --keep   leave the namespace + artifacts + zot repo
 #
-# Needs: kubectl, tkn, crane, jq (host tools). zot must be up in cv-pipeline
-# (bootstrap/bootstrap.sh) and the OrbStack node-trust steps done (runbook.md).
+# Needs: kubectl, tkn, crane, jq, cosign, oras (host tools). zot must be up in
+# cv-pipeline (bootstrap/bootstrap.sh) and the OrbStack node-trust steps done
+# (docs/runbook.md).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck source=scripts/lib/log.sh
 source "$ROOT/scripts/lib/log.sh"
 cd "$ROOT"
-need kubectl; need tkn; need crane; need jq
+need kubectl; need tkn; need crane; need jq; need cosign; need oras
 
 KEEP=0
 [ "${1:-}" = "--keep" ] && KEEP=1
@@ -36,6 +37,7 @@ UTILITY="docker.io/library/bash@${CNBUTILITYIMAGE}"
 KUBECTL_IMG="docker.io/alpine/k8s:1.31.1@${CNBKUBECTLIMAGE}"
 GIT_IMG="docker.io/alpine/git@${CNBGITIMAGE}"
 TRIVY_IMG="ghcr.io/aquasecurity/trivy@${TRIVYCLI}"
+ORAS_IMG="ghcr.io/oras-project/oras@${ORASCLI}"
 TRIVY_DB="${TRIVYDB}"
 
 UID_SUFFIX="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
@@ -106,6 +108,7 @@ spec:
     - { name: kubectl-image, value: "$KUBECTL_IMG" }
     - { name: git-image, value: "$GIT_IMG" }
     - { name: trivy-image, value: "$TRIVY_IMG" }
+    - { name: oras-image, value: "$ORAS_IMG" }
     - { name: trivy-db, value: "$TRIVY_DB" }
     - { name: frontend-repo, value: "$FRONTEND_REPO_URL" }
     - { name: frontend-ref, value: "$FIXTURE_SHA" }
@@ -178,6 +181,40 @@ check "cv-deploy-state records the PipelineRun" test "$cm_pr" = "$PRN"
 
 leftover="$(kubectl -n "$NS" get deploy,svc -l 'cv-oci/smoke' -o name 2>/dev/null | wc -l | tr -d ' ')"
 check "no run-scoped smoke resources leaked" test "$leftover" = "0"
+
+# ---- Slice 4: Chains SLSA provenance + T5 referrers -------------------
+# Chains signs asynchronously ~30-60s after the PipelineRun completes.
+build_tr="$(kubectl -n "$NS" get taskrun -l tekton.dev/pipelineTask=build -o name 2>/dev/null | head -1)"
+signed=""
+for _ in $(seq 1 30); do
+	signed="$(kubectl -n "$NS" get "$build_tr" -o jsonpath='{.metadata.annotations.chains\.tekton\.dev/signed}' 2>/dev/null || true)"
+	[ "$signed" = "true" ] || [ "$signed" = "failed" ] && break
+	sleep 5
+done
+check "Chains signed the build TaskRun" test "$signed" = "true"
+
+PUB="$ART/cosign.pub"
+cosign public-key --key k8s://tekton-chains/signing-secrets > "$PUB" 2>/dev/null || true
+CVFLAGS=(--key "$PUB" --insecure-ignore-tlog=true --allow-insecure-registry)
+check "image signature verifies"            cosign verify             "${CVFLAGS[@]}" "$want_ref"
+check "SLSA attestation verifies"           cosign verify-attestation "${CVFLAGS[@]}" --type slsaprovenance1 "$want_ref"
+
+pred="$(cosign verify-attestation "${CVFLAGS[@]}" --type slsaprovenance1 "$want_ref" 2>/dev/null | jq -r '.payload' | base64 -d)"
+check "provenance names the builder as a material" bash -c \
+	"printf '%s' '$pred' | jq -e '.predicate.buildDefinition.resolvedDependencies[]|select(.digest.sha256==\"${CNBBUILDER#sha256:}\")' >/dev/null"
+
+refs="$(oras discover --insecure --format tree "$want_ref" 2>/dev/null || true)"
+check "referrer: SLSA provenance (sigstore bundle)" bash -c "printf '%s' '$refs' | grep -q 'sigstore.bundle'"
+check "referrer: CycloneDX SBOM"                    bash -c "printf '%s' '$refs' | grep -q 'application/vnd.cyclonedx+json'"
+check "referrer: CVE-verdict record"                bash -c "printf '%s' '$refs' | grep -q 'cv-oci.cve-verdict'"
+
+# Tamper: a byte-mutated copy has a new digest with no signature — verify must fail.
+tampered="${APP_REPO}:tampered-${UID_SUFFIX}"
+crane copy --insecure "$want_ref" "$tampered" >/dev/null 2>&1 || true
+tdigest="$(crane mutate --insecure "$tampered" --annotation cv-oci.test=tamper -t "$tampered" 2>/dev/null; crane digest --insecure "$tampered" 2>/dev/null || true)"
+check "tampered image FAILS cosign verify" bash -c \
+	"! cosign verify ${CVFLAGS[*]} '${APP_REPO}@${tdigest}' 2>/dev/null"
+crane delete --insecure "$tampered" >/dev/null 2>&1 || true
 
 echo
 if [ "$FAILURES" -eq 0 ]; then

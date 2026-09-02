@@ -51,6 +51,7 @@ UTILITY="docker.io/library/bash@${CNBUTILITYIMAGE}"
 KUBECTL_IMG="docker.io/alpine/k8s:1.31.1@${CNBKUBECTLIMAGE}"
 GIT_IMG="docker.io/alpine/git@${CNBGITIMAGE}"
 TRIVY_IMG="ghcr.io/aquasecurity/trivy@${TRIVYCLI}"
+ORAS_IMG="ghcr.io/oras-project/oras@${ORASCLI}"
 TRIVY_DB="${TRIVYDB}"
 
 UID_SUFFIX="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
@@ -113,6 +114,7 @@ spec:
     - { name: kubectl-image, value: "$KUBECTL_IMG" }
     - { name: git-image, value: "$GIT_IMG" }
     - { name: trivy-image, value: "$TRIVY_IMG" }
+    - { name: oras-image, value: "$ORAS_IMG" }
     - { name: trivy-db, value: "$TRIVY_DB" }
     - { name: frontend-repo, value: "$FRONTEND_REPO" }
     - { name: frontend-ref, value: "$FIXTURE_SHA" }

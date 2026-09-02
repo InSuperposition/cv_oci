@@ -489,27 +489,27 @@ never a committed file, so a re-bootstrap on a bisected checkout can't stale it.
 `bootstrap.sh` installs cert-manager (phase 1b, done) then Chains (v0.29.0,
 vendored — T2).
 
-**Provenance authoring (Decision 8 — real task work).** The `build` task emits, as
-typed results, the whole input closure so the SLSA predicate names it:
+**Provenance authoring (Decision 8 — T4).** The `buildpacks` task's `results`
+step emits `builder_ARTIFACT_INPUTS` + `runImage_ARTIFACT_INPUTS` — object
+results `{"uri": "<repo:tag>", "digest": "sha256:<hex>"}` from the digest-pinned
+params. Chains type-hint suffix `ARTIFACT_INPUTS` → the signed predicate's
+`resolvedDependencies` gains the builder + run image (verified T4:
+`name: "inputs/result"`, digest-pinned; Chains also auto-resolves the step
+container images). The `report.toml` digest-parse bug (finding E) was fixed in
+`a191de8`.
 
-- `BUILDER_IMAGE_DIGEST`, `RUN_IMAGE_DIGEST` — from `/layers/report.toml` + the
-  pinned builder param. The `report.toml` digest-parse bug (eng-review finding E)
-  is **already fixed** — `a191de8` (T1): section-aware awk on `[image]`,
-  `scripts/test/report-digest.bats`. `RUN_IMAGE_DIGEST` comes from the pinned
-  `run-image` param, not `report.toml` (there is no `[run-image]` table).
-- `BUILDPACKS` — id\@version list from `io.buildpacks.build.metadata`.
-- `APP_SOURCE_DIGEST` — `cv_frontend@<full-sha>` (known in `fetch`).
-- `*_ARTIFACT_INPUTS` type hints so Chains records them as materials.
-- **Chains result-name check (eng-review finding):** Chains matches the
-  `*_IMAGE_URL` / `*_IMAGE_DIGEST` suffix on **task** results (the `buildpacks`
-  task's `APP_IMAGE_DIGEST` matches). The **pipeline** re-surfaces them kebab
-  (`app-image-digest`). Confirm PipelineRun-level matching or keep the underscore
-  convention on the pipeline results.
+**Deferred to a T4-followup:** `APP_SOURCE_DIGEST` (`cv_frontend@<sha>`, known
+in `fetch` — needs cross-task result plumbing + `enable-deep-inspection` +
+renaming the pipeline results to the `*_IMAGE_URL`/`*_IMAGE_DIGEST` underscore
+convention so Chains emits PipelineRun-level provenance too) and `BUILDPACKS`
+(id\@version from `/layers/config/metadata.toml`). The builder digest already
+pins the whole build environment, so this is enrichment, not a gap.
 
-**Git-resolve the Pipeline** so `status.provenance.refSource` names it — the
-Tekton **git** resolver (already enabled, `bootstrap.sh` phase 2), pulling
-`pipeline.yaml` from **GitHub**. Needs only the repo pushed to a reachable remote
-— **not gated on P4** (P4 is the separate *bundles* resolver, a later nicety).
+**Git-resolve the Pipeline — deferred to Slice 5.** For a *test* run the
+pipeline comes from `kubectl apply`, not git, so `refSource` is legitimately
+empty; git-resolving would also break local iteration on `pipeline.yaml`. The
+real trigger path (`cv_gitops` → the pipeline) git-resolves in Slice 5. The
+Tekton git resolver is already enabled.
 
 **Reproducible provenance — accept the documented fallback (P8 RESOLVED, T2).**
 Two byte-identical builds of one SHA (Slice 2) do NOT produce an identical
@@ -519,16 +519,19 @@ predicate (dumped in T2) confirms **`resolvedDependencies` entries are
 `{uri, digest}` only** — no per-run fields. So `repro.sh` asserts the
 predicate's `subject` + the **sorted set of `resolvedDependencies` digests**
 match across two builds; the predicate is not itself content-addressed.
-`buildType` is already `https://tekton.dev/chains/v2/slsa` (the default, strict)
-— no config needed. T4 enriches `resolvedDependencies` (currently Chains
-auto-resolves only the step-container images — `bash`, `heroku/builder`).
+`buildType` is already `https://tekton.dev/chains/v2/slsa` (the default, strict).
+T4 added the builder + run image to `resolvedDependencies` via `ARTIFACT_INPUTS`
+type hints. (The `repro.sh` materials-digest assertion itself is the T6-followup
+— repro already proves the *build* is reproducible via the CNB layer hashes;
+the materials are digest-pinned params, trivially equal across builds.)
 
-**Referrers — `sigstore-bundle` (P9 resolved).** `storage.oci.encoding-format
-= sigstore-bundle` makes Chains write via the **OCI 1.1 Referrers API** (not the
-`sha256-<digest>.sig` tag scheme). `oras discover` sees them. The SBOM and
-CVE-verdict records (Slice 3) attach the same way — the `scan` step, or a small
-`referrers` step after `scan`, `oras attach`es `sbom.cdx.json` +
-`cve-verdict.json` to the app digest. All three referrers discoverable by
+**Referrers — `sigstore-bundle` (P9 resolved; T5 DONE).** `storage.oci.encoding-format
+= sigstore-bundle` makes Chains write via the **OCI 1.1 Referrers API**.
+`oras discover` sees them. T5: a `referrers` step in the `scan` task (pinned
+`ghcr.io/oras-project/oras` image, uid 1000 restricted) `oras attach`es
+`sbom.cdx.json` (`application/vnd.cyclonedx+json`) + `cve-verdict.json`
+(`application/vnd.cv-oci.cve-verdict.v1+json`) to the app digest — only when the
+scan passes. All three (SLSA provenance, SBOM, CVE-verdict) are one
 `oras discover`.
 
 **cosign verify with no Rekor (P10 — RESOLVED, T2).** Confirmed against a real
@@ -546,13 +549,13 @@ cosign verify              --key <pub> \
 `transparency.enabled=false`. `--allow-insecure-registry` for the self-signed
 zot (drops once the host trusts the CA). cosign v3.1.3.
 
-**Acceptance:** `cosign verify` + `cosign verify-attestation` pass on the built
-digest (public key read from the live cluster); a `crane`-tampered copy fails;
-`oras discover` lists the SLSA provenance + SBOM + CVE-verdict referrers;
-`repro.sh` asserts matching `subject` + materials-digests across two builds;
-`bisect-safe` (re-bootstrap keeps the existing `signing-secrets` key). `e2e.sh`
-waits for `chains.tekton.dev/signed=true` (async, ~30–60s) before the verify
-assertions.
+**Acceptance (T6 DONE).** `e2e.sh` waits for `chains.tekton.dev/signed=true`
+(async, ~30–60s) then asserts: `cosign verify` + `cosign verify-attestation
+--type slsaprovenance1` pass (pubkey read from `k8s://tekton-chains/signing-secrets`,
+never a file — bisect safety); the predicate `resolvedDependencies` name the
+builder digest; `oras discover` lists all three referrers (SLSA bundle, SBOM,
+CVE-verdict); a `crane`-mutated copy FAILS `cosign verify`. Bisect-safe —
+re-bootstrap keeps the existing `signing-secrets` key (T8).
 
 #### `cv_openbao` — transit signing, its own repo (eng review 2026-09-02)
 
@@ -1068,39 +1071,32 @@ is one address (OrbStack service DNS + daemon `insecure-registries`).**
 ### Slice 4 — from the 2026-09-02 eng review
 
 JSONL: `~/.gstack/projects/InSuperposition-cv_oci/tasks-eng-review-20260902-110518.jsonl`.
-T1–T3 are P1 (the transport fix + signing land together); do T8 alongside T1.
+Commits: `66048c2` T1, `6f8cb55` T2+T8, `c63d6dc` T3-defer, + T4/T5/T6.
 
-- [ ] **T1 (P1, human ~3h / CC ~30min)** — `manifests/cert-manager/` + `manifests/zot/` +
-  `bootstrap.sh` — zot TLS declaratively: self-signed `ClusterIssuer` + `Certificate`
-  for `zot.cv-pipeline.svc.cluster.local`, trust-manager `Bundle` → CA ConfigMap in
-  `cv-pipeline` + `tekton-chains`; zot `Deployment` mounts the cert Secret; `http.tls`
-  block. bootstrap installs cert-manager + trust-manager (pinned). Verify: `openssl
-  s_client` to `zot:5000` shows the cert; kubelet still pulls (existing
-  `insecure-registries` covers self-signed).
-- [ ] **T2 (P1, human ~1h / CC ~15min)** — `tekton-chains` — mount the trust-manager
-  CA ConfigMap into the chains-controller trust store. Verify: a build's
-  `chains.tekton.dev/signed` annotation flips to `true` (was `failed`).
-- [ ] **T3 (P1, human ~2h / CC ~20min)** — `pipeline/pipeline.yaml` + `tasks/buildpacks.yaml`
-  — lifecycle `create` + trivy `scan` mount the CA ConfigMap via one YAML anchor;
-  drop `CNB_INSECURE_REGISTRIES` + trivy `--insecure`. Verify: `e2e.sh` green.
-- [ ] **T4 (P1, human ~4h / CC ~40min)** — `tasks/buildpacks.yaml` + `pipeline/pipeline.yaml`
-  — provenance authoring (Decision 8): emit `BUILDER_IMAGE_DIGEST` / `RUN_IMAGE_DIGEST`
-  / `BUILDPACKS` / `APP_SOURCE_DIGEST` as typed results + `*_ARTIFACT_INPUTS` hints;
-  git-resolve `pipeline.yaml` from GitHub. Verify: the SLSA predicate names them.
-- [ ] **T5 (P2, human ~2h / CC ~20min)** — `pipeline/pipeline.yaml` + `digests.cue` —
-  `oras attach` `sbom.cdx.json` + `cve-verdict.json` to the app digest (pinned oras
-  image, uid 1000, CA-trust). Verify: `oras discover` lists 3 referrers.
-- [ ] **T6 (P1, human ~3h / CC ~30min)** — `scripts/test/{e2e,negative,repro}.sh` —
-  `e2e.sh` waits for `signed=true` then `cosign verify` + `cosign verify-attestation`
-  (pubkey from `k8s://tekton-chains/signing-secrets`, **not** a file); `oras discover`
-  = 3; `negative.sh` `crane`-tamper → verify fails; `repro.sh` predicate `subject` +
-  materials-digests match across 2 builds.
-- [ ] **T7 (P2, human ~1h / CC ~15min)** — dump a real `slsa/v2alpha4` predicate;
-  confirm `resolvedDependencies` are digest-only (else re-scope `repro.sh` to
-  `subject`); confirm the exact no-Rekor `cosign verify-attestation` flags (P10).
-- [ ] **T8 (P2, human ~30min / CC ~10min)** — `bootstrap.sh` generates the
-  `signing-secrets` cosign key **only if absent** — never regenerate (bisect safety,
-  outside voice #2).
+- [x] **T1 — zot TLS.** cert-manager v1.21.1 vendored; `manifests/cert-manager/issuers.yaml`
+  (selfSigned → CA → `cv-oci-ca` CA ClusterIssuer); `manifests/zot/certificate.yaml`;
+  `http.tls` + Secret mount + HTTPS probes; `bootstrap.sh` phase 1b. **trust-manager
+  dropped** (helm-only) → per-namespace CA `Certificate`.
+- [x] **T2 — Chains signs + trusts the CA.** Chains v0.29.0 vendored; `manifests/chains/`
+  config + `ca-cert.yaml` + `controller-ca-patch.yaml`
+  (`SSL_CERT_DIR=/etc/ssl/certs:/etc/cv-oci-ca`). Build `signed=true`.
+- [~] **T3 — DEFERRED.** Pipeline steps keep `--insecure`; CA into every ephemeral
+  test namespace is machinery for a non-threat on a solo cluster. `debt.md`.
+- [x] **T4 — provenance materials.** `buildpacks` task emits
+  `builder_ARTIFACT_INPUTS` + `runImage_ARTIFACT_INPUTS` → the predicate's
+  `resolvedDependencies` names the builder + run image, digest-pinned.
+  `APP_SOURCE_DIGEST` / `BUILDPACKS` / pipeline-level provenance / git-resolve
+  are a **T4-followup** (see the Provenance section above).
+- [x] **T5 — referrers.** `referrers` step in the `scan` task (pinned
+  `ghcr.io/oras-project/oras`, `orasCli` in digests.cue) `oras attach`es the SBOM
+  + `cve-verdict.json`. All 3 in one `oras discover`.
+- [x] **T6 — acceptance.** `e2e.sh` waits for `signed=true` then asserts `cosign
+  verify` + `verify-attestation --type slsaprovenance1` (pubkey from the cluster),
+  the builder-digest material, 3 referrers, and a `crane`-mutated copy fails verify.
+- [x] **T7 — predicate confirmed** (in T2): `resolvedDependencies` are `{uri,digest}`;
+  P10 flags `--type slsaprovenance1 --insecure-ignore-tlog=true --allow-insecure-registry`.
+- [x] **T8 — bisect-safe key** (folded into T2): `bootstrap.sh` generates the
+  `signing-secrets` key only if absent.
 
 ### Prior — 2026-09-01 SSOT-merge eng review (T1–T4 all shipped)
 

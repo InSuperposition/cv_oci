@@ -17,6 +17,9 @@
 #     PSA-restricted; the `prepare` step's `chown -R` (its only root use) is
 #     deleted — `fetch` writes the source tree as 1000 and fsGroup 1000 makes
 #     the PVC + emptyDir volumes group-writable. No root anywhere in the task.
+#   - Slice 4 (T4): the `results` step also emits `builder_ARTIFACT_INPUTS` and
+#     `runImage_ARTIFACT_INPUTS` object results — Tekton Chains records them as
+#     SLSA `resolvedDependencies` (materials) on the signed attestation.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
@@ -99,6 +102,22 @@ spec:
       description: The digest of the built `APP_IMAGE`.
     - name: APP_IMAGE_URL
       description: The URL of the built `APP_IMAGE`.
+    # Slice 4 (T4): SLSA material type-hints — Chains records these under the
+    # attestation's `resolvedDependencies`. The builder image is the entire
+    # build environment; the run image is the deployed base. Both are
+    # digest-pinned params fed from digests.cue.
+    - name: builder_ARTIFACT_INPUTS
+      description: The CNB builder image (SLSA material).
+      type: object
+      properties:
+        uri: { type: string }
+        digest: { type: string }
+    - name: runImage_ARTIFACT_INPUTS
+      description: The CNB run image (SLSA material).
+      type: object
+      properties:
+        uri: { type: string }
+        digest: { type: string }
 
   stepTemplate:
     env:
@@ -221,6 +240,20 @@ spec:
 
         printf '%s' "$digest"             | tee "$(results.APP_IMAGE_DIGEST.path)"
         printf '%s' "$(params.APP_IMAGE)" | tee "$(results.APP_IMAGE_URL.path)"
+
+        # Slice 4 (T4): builder + run image as SLSA materials. The params are
+        # `<repo>[:tag]@sha256:<hex>` (digest-pinned from digests.cue). Falls
+        # back to a bare uri if a caller passes an un-pinned ref.
+        emit_material() { # emit_material <ref> <result-path>
+          _ref="$1"; _out="$2"
+          case "$_ref" in
+            *@*) printf '{"uri":"%s","digest":"%s"}' "${_ref%@*}" "${_ref#*@}" > "$_out" ;;
+            "")  printf '{"uri":"","digest":""}' > "$_out" ;;
+            *)   printf '{"uri":"%s","digest":""}' "$_ref" > "$_out" ;;
+          esac
+        }
+        emit_material "$(params.BUILDER_IMAGE)" "$(results.builder_ARTIFACT_INPUTS.path)"
+        emit_material "$(params.RUN_IMAGE)"     "$(results.runImage_ARTIFACT_INPUTS.path)"
       volumeMounts:
         - name: layers-dir
           mountPath: /layers

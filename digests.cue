@@ -53,6 +53,12 @@ images: {
 	trivyCli: "sha256:55ad20f8a239a3e95427e60b8aaea38788550c18a3f1772976bebf732e6ae166"
 	trivyDb:  "sha256:35f26e97af328ec930bf41d86c6a34ca68c11d32ccd10d3de2b7ad856ed6e084"
 
+	// ghcr.io/oras-project/oras:v1.2.3 — arm64 child. The `scan` task's
+	// `referrers` step `oras attach`es the CycloneDX SBOM + the CVE-verdict
+	// record to the app digest (Slice 4 T5). Tekton Chains attaches the SLSA
+	// provenance the same way (OCI 1.1 Referrers API).
+	orasCli: "sha256:c4d59cab4aa6d6cfb8e3c31b571f5af5086004f3fe28700b844a14660bf0c9c4"
+
 	// Slice 4
 	cosignCli: ""
 	chains:    "" // ghcr.io/tektoncd/chains

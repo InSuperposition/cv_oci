@@ -17,7 +17,8 @@ tests need. Pin these; a version bump is a reviewed commit (Rule 12).
 | `jq` | 1.8.2 | JSONL task artifacts, scripting | `brew install jq` |
 | `git` | 2.55.0 | everything | system |
 | `trivy` | 0.74.0 | `scripts/test/negative.sh` CVE-gate scenario (`trivy sbom` against the frozen fixture). The pipeline `scan` step runs the pinned `trivy` **image** (`digests.cue` `trivyCli`), not this host binary. | `brew install trivy` / [releases](https://github.com/aquasecurity/trivy/releases) |
-| `cosign` | (pin at first use) | `cosign verify` / `verify-attestation` (Slice 4) | `brew install cosign` |
+| `cosign` | 3.1.3 | `bootstrap.sh` phase 5 generates the Chains signing key (`cosign generate-key-pair k8s://…`, only-if-absent); `scripts/test/e2e.sh` `cosign verify` / `verify-attestation` (Slice 4). | `brew install cosign` |
+| `oras` | 1.2.3 | `scripts/test/e2e.sh` `oras discover` (Slice 4 referrers). | `brew install oras` / [releases](https://github.com/oras-project/oras/releases) |
 
 ## In-cluster CRD schemas for `scripts/validate.sh`
 
@@ -37,4 +38,4 @@ are added:
 |---|---|---|---|
 | Tekton Pipelines | v1.15.1 | `vendor/tekton/pipeline-v1.15.1.yaml` | `68da92cc…3c86` |
 | cert-manager | v1.21.1 | `vendor/cert-manager/cert-manager-v1.21.1.yaml` | `5f6a499b…e408` |
-| Tekton Chains | v0.29.0 | _applied from GitHub release during probing; vendor in the Slice 4 commit_ | — |
+| Tekton Chains | v0.29.0 | `vendor/tekton-chains/chains-v0.29.0.yaml` | `97d68bb6…aef2` |

@@ -8,6 +8,7 @@
 #   phase 2  feature flags: git resolver + set-security-context (Slice 1.7 PSA)
 #   phase 3  cv-pipeline namespace + RBAC + ServiceAccount
 #   phase 4  zot seed (TLS via cert-manager) + the cv-build pipeline
+#   phase 5  Tekton Chains (vendored) — x509 signing, sigstore-bundle referrers
 #
 # Per-platform node trust for the CNB pull path (docs/runbook.md) is NOT done
 # here — it changes host config. phase 4 prints the two commands.
@@ -29,6 +30,10 @@ TEKTON_SHA256="68da92cc20086184b795dae6ce425c47fe6ca3ee82b288b228bcce76bb4b3c86"
 CERT_MANAGER_VERSION="v1.21.1"
 CERT_MANAGER_YAML="vendor/cert-manager/cert-manager-${CERT_MANAGER_VERSION}.yaml"
 CERT_MANAGER_SHA256="5f6a499b8c1857d57f560f536e0dcc830914b45c420899fe7ad0692c8624e408"
+
+CHAINS_VERSION="v0.29.0"
+CHAINS_YAML="vendor/tekton-chains/chains-${CHAINS_VERSION}.yaml"
+CHAINS_SHA256="97d68bb6d8d7d60705a88ec77746c5dd3cc361e29caae4f3789ba87cd2aaaef2"
 
 phase() { printf '\n=== phase %s: %s ===\n' "$1" "$2" >&2; }
 
@@ -148,6 +153,44 @@ kubectl -n cv-pipeline rollout status deploy/zot --timeout=120s >/dev/null
 
 kubectl -n cv-pipeline apply -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
 log_kv step=pipeline state=applied
+
+# ---- phase 5 --------------------------------------------------------
+phase 5 "Tekton Chains ${CHAINS_VERSION}"
+need cosign
+echo "${CHAINS_SHA256}  ${CHAINS_YAML}" | shasum -a 256 -c - >/dev/null \
+	|| die "Chains release checksum mismatch: ${CHAINS_YAML}"
+
+if kubectl get deploy/tekton-chains-controller -n tekton-chains \
+	-o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}' 2>/dev/null \
+	| grep -qx "${CHAINS_VERSION}"; then
+	log_kv step=chains state=already-installed version="${CHAINS_VERSION}"
+else
+	kubectl apply -f "${CHAINS_YAML}" >/dev/null
+	log_kv step=chains action=applied
+fi
+kubectl wait --for=condition=Available --timeout=180s -n tekton-chains \
+	deploy/tekton-chains-controller >/dev/null
+
+# Config + the CA trust the controller needs to push to the TLS zot.
+kubectl apply -f manifests/chains/config.yaml -f manifests/chains/ca-cert.yaml >/dev/null
+kubectl wait --for=condition=Ready --timeout=120s -n tekton-chains certificate/cv-oci-ca >/dev/null
+kubectl -n tekton-chains patch deploy tekton-chains-controller \
+	--patch-file manifests/chains/controller-ca-patch.yaml >/dev/null
+
+# Signing key — generate ONLY if absent (bisect safety: a re-bootstrap on an
+# older checkout must not mint a new key that fails verify against prior sigs).
+if kubectl -n tekton-chains get secret signing-secrets \
+	-o jsonpath='{.data.cosign\.key}' 2>/dev/null | grep -q .; then
+	log_kv step=chains state=signing-key-present
+else
+	COSIGN_PASSWORD="" cosign generate-key-pair k8s://tekton-chains/signing-secrets >/dev/null
+	rm -f cosign.pub
+	log_kv step=chains action=signing-key-generated
+fi
+
+kubectl -n tekton-chains rollout restart deploy/tekton-chains-controller >/dev/null
+kubectl -n tekton-chains rollout status deploy/tekton-chains-controller --timeout=180s >/dev/null
+log_kv step=chains state=ready
 
 cat >&2 <<'NOTE'
 

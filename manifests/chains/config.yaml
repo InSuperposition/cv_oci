@@ -1,0 +1,25 @@
+---
+# Slice 4 — Tekton Chains config. Sign the PipelineRun + TaskRun SLSA
+# provenance with the x509 cosign key in `signing-secrets`, store everything in
+# the app image's repo via the OCI 1.1 Referrers API, no transparency log.
+#
+# The install (vendor/tekton-chains/) ships this ConfigMap with code-default
+# values; bootstrap.sh `kubectl apply`s this over it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chains-config
+  namespace: tekton-chains
+  labels:
+    app.kubernetes.io/part-of: cv-oci
+data:
+  artifacts.pipelinerun.format: slsa/v2alpha4
+  artifacts.pipelinerun.storage: oci
+  artifacts.taskrun.format: slsa/v2alpha4
+  artifacts.taskrun.storage: oci
+  artifacts.oci.storage: oci
+  # sigstore-bundle → OCI 1.1 Referrers API (not the sha256-<d>.sig tag scheme),
+  # so `oras discover` finds the provenance alongside the SBOM + CVE-verdict.
+  storage.oci.encoding-format: sigstore-bundle
+  # No Rekor — single-actor cluster, static key.
+  transparency.enabled: "false"

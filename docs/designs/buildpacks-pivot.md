@@ -472,7 +472,7 @@ CA-consuming namespaces grows.
 
 | Client | today | Slice 4 |
 |---|---|---|
-| Tekton Chains controller | **fails** (HTTPS-only client, no insecure knob) | mount `ca.crt` from the `cv-oci-ca-bundle` Secret — the one hard requirement (T2) |
+| Tekton Chains controller | **fails** (HTTPS-only client, no insecure knob) | **T2 DONE** — `SSL_CERT_DIR=/etc/ssl/certs:/etc/cv-oci-ca` + the `cv-oci-ca-bundle` Secret mounted (`controller-ca-patch.yaml`). Build TaskRun `signed: true`; `oras discover` finds the `sigstore-bundle`; `cosign verify` + `verify-attestation` pass. |
 | lifecycle `create`, trivy `scan` | `--insecure` / `CNB_INSECURE_REGISTRIES` | mount `ca.crt` from the `zot-tls` Secret (YAML anchor); drop the insecure flags (T3). Until T3, the existing `--insecure` flags tolerate the self-signed cert, so e2e stays green after T1. |
 | host `crane` / `oras` / `cosign` | `--insecure` | keep `--insecure` (host-only, low stakes) or `SSL_CERT_FILE` |
 | OrbStack node (kubelet pull) | `docker.json` insecure-registries | **unchanged** — `insecure-registries` already means "accept an unverified TLS cert for this host" |
@@ -511,16 +511,17 @@ Tekton **git** resolver (already enabled, `bootstrap.sh` phase 2), pulling
 `pipeline.yaml` from **GitHub**. Needs only the repo pushed to a reachable remote
 — **not gated on P4** (P4 is the separate *bundles* resolver, a later nicety).
 
-**Reproducible provenance — accept the documented fallback (P8 resolved).** Two
-byte-identical builds of one SHA (Slice 2) do NOT produce an identical provenance
-*predicate* — `slsa/v2alpha4` embeds `startedOn` / `finishedOn` and the
-PipelineRun UID, and Chains exposes no normalize knob. So the determinism claim
-is scoped: **`repro.sh` asserts the predicate's `subject` + the *digests* in
-`resolvedDependencies` match across two builds**, not the whole predicate digest.
-**First 4-task: dump a real predicate and confirm `resolvedDependencies` entries
-are digest-only** — if they carry per-run URIs or fetch timestamps, the materials
-assertion also drifts and the determinism story needs re-scoping to `subject`
-only. `buildtype: slsa` (strict) keeps the predicate as small as Chains allows.
+**Reproducible provenance — accept the documented fallback (P8 RESOLVED, T2).**
+Two byte-identical builds of one SHA (Slice 2) do NOT produce an identical
+provenance *predicate* — `runDetails.metadata` carries `startedOn` /
+`finishedOn` / `invocationId` and Chains has no normalize knob. But a real
+predicate (dumped in T2) confirms **`resolvedDependencies` entries are
+`{uri, digest}` only** — no per-run fields. So `repro.sh` asserts the
+predicate's `subject` + the **sorted set of `resolvedDependencies` digests**
+match across two builds; the predicate is not itself content-addressed.
+`buildType` is already `https://tekton.dev/chains/v2/slsa` (the default, strict)
+— no config needed. T4 enriches `resolvedDependencies` (currently Chains
+auto-resolves only the step-container images — `bash`, `heroku/builder`).
 
 **Referrers — `sigstore-bundle` (P9 resolved).** `storage.oci.encoding-format
 = sigstore-bundle` makes Chains write via the **OCI 1.1 Referrers API** (not the
@@ -530,14 +531,20 @@ CVE-verdict records (Slice 3) attach the same way — the `scan` step, or a smal
 `cve-verdict.json` to the app digest. All three referrers discoverable by
 `oras discover`.
 
-**cosign verify with no Rekor (P10 — confirm early in Slice 4).** Expected form:
-`cosign verify-attestation --key <pub> --type slsaprovenance
---insecure-ignore-tlog=true <digest>` (and `cosign verify` for the image
-signature), `--insecure-ignore-tlog` because `transparency.enabled=false`. The
-probe run got as far as Chains **failing** to push to the plain-HTTP zot — no
-signature landed, so the exact flags for a `sigstore-bundle` (RFC3161 timestamp
-handling, predicate-type URI) are confirmed only once the TLS work lets the push
-succeed. cosign v3.1.3 (host).
+**cosign verify with no Rekor (P10 — RESOLVED, T2).** Confirmed against a real
+Chains `sigstore-bundle` on the TLS zot:
+
+```
+cosign verify-attestation --key <pub> --type slsaprovenance1 \
+  --insecure-ignore-tlog=true --allow-insecure-registry <ref>
+cosign verify              --key <pub> \
+  --insecure-ignore-tlog=true --allow-insecure-registry <ref>
+```
+
+`slsaprovenance1` (not `slsaprovenance`) — Chains v0.29 emits predicate type
+`https://slsa.dev/provenance/v1`. `--insecure-ignore-tlog` because
+`transparency.enabled=false`. `--allow-insecure-registry` for the self-signed
+zot (drops once the host trusts the CA). cosign v3.1.3.
 
 **Acceptance:** `cosign verify` + `cosign verify-attestation` pass on the built
 digest (public key read from the live cluster); a `crane`-tampered copy fails;
@@ -667,9 +674,9 @@ with the specific mismatch named.
 | **P4** | Can the Tekton **bundles** resolver pull task/pipeline bundles from plain-HTTP zot? | a later "tasks as OCI bundles" nicety — nothing in Slices 3–6 depends on it | open (moot once zot is TLS in Slice 4) |
 | **P5** | Flux `GitRepository.spec.verify` exact scope on a git source — commit only, or the referenced image? attestations? bounded retry? | Slice 5 | open — run before Slice 5 |
 | **P6** | Chains + sigstore `hashivault://` against OpenBao — scheme? auth? | `cv_openbao` (separate repo) | provisionally resolved (docs): `hashivault://` should work against OpenBao; auth = OIDC/JWT via the Chains SA token. Live wire-up is `cv_openbao`'s first task. |
-| **P8** | Can the `slsa/v2alpha4` predicate's timestamps + run UID be normalized so two builds give an identical provenance digest? | Slice 4 reproducible provenance | **RESOLVED** — no. Chains has no knob. Fallback: assert `subject` + materials-digests match, not the predicate digest — after confirming `resolvedDependencies` entries are digest-only. |
-| **P9** | Chains `storage: oci` — tag scheme or OCI 1.1 Referrers API? | Slice 4 referrer layout | **RESOLVED** — `storage.oci.encoding-format: sigstore-bundle` → Referrers API; `oras discover` sees them. |
-| **P10** | Exact `cosign verify` / `verify-attestation` invocation for a Chains `sigstore-bundle`, no Rekor. | Slice 4 verify + Slice 5 `spec.verify` | partial — expected form known (`--insecure-ignore-tlog=true`, `--type slsaprovenance`); confirm once Slice 4's TLS lets a signature land in zot. |
+| **P8** | Can the `slsa/v2alpha4` predicate's timestamps + run UID be normalized so two builds give an identical provenance digest? | Slice 4 reproducible provenance | **RESOLVED (T2)** — no normalize knob, but `resolvedDependencies` entries are `{uri, digest}` only. `repro.sh` asserts `subject` + the sorted materials-digest set. |
+| **P9** | Chains `storage: oci` — tag scheme or OCI 1.1 Referrers API? | Slice 4 referrer layout | **RESOLVED** — `storage.oci.encoding-format: sigstore-bundle` → Referrers API; `oras discover` sees them (verified T2). |
+| **P10** | Exact `cosign verify` / `verify-attestation` invocation for a Chains `sigstore-bundle`, no Rekor. | Slice 4 verify + Slice 5 `spec.verify` | **RESOLVED (T2)** — `--type slsaprovenance1 --insecure-ignore-tlog=true --allow-insecure-registry`. |
 | **P7** | Flagger meshless (`provider: kubernetes`) — metric signal without a mesh? | a possible progressive-delivery slice, not yet planned | open |
 
 P1/P2/P3 (regctl assembly, `docker load`, zot two-address) are **dead** — the

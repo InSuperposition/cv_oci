@@ -1,0 +1,28 @@
+---
+# Slice 4 — the Chains controller is an HTTPS-only Go client with no insecure
+# knob, so it must trust the cv-oci CA to push attestations to the now-TLS zot.
+# Mount ca.crt from the cert-manager-issued `cv-oci-ca-bundle` Secret
+# (manifests/chains/ca-cert.yaml) and add it to SSL_CERT_DIR alongside the
+# distroless base's system roots (colon-separated; Go reads every dir).
+#
+# Applied by bootstrap.sh: kubectl -n tekton-chains patch deploy
+#   tekton-chains-controller --patch-file manifests/chains/controller-ca-patch.yaml
+spec:
+  template:
+    spec:
+      containers:
+        - name: tekton-chains-controller
+          env:
+            - name: SSL_CERT_DIR
+              value: /etc/ssl/certs:/etc/cv-oci-ca
+          volumeMounts:
+            - name: cv-oci-ca
+              mountPath: /etc/cv-oci-ca
+              readOnly: true
+      volumes:
+        - name: cv-oci-ca
+          secret:
+            secretName: cv-oci-ca-bundle
+            items:
+              - key: ca.crt
+                path: ca.crt

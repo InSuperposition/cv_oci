@@ -40,7 +40,8 @@ else
 	# non-manifest YAML.
 	mapfile -t files < <(
 		git ls-files -- '*.yaml' '*.yml' \
-		| grep -Ev '^(schemas/|vendor/|scripts/test/fixtures/|params\.yaml$)' || true
+		| grep -Ev '^(schemas/|vendor/|scripts/test/fixtures/|params\.yaml$)' \
+		| grep -Ev '(^|/)[a-z0-9-]+-patch\.yaml$' || true
 	)
 fi
 

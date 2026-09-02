@@ -28,4 +28,13 @@ are added:
 | Schema | Source | Version |
 |---|---|---|
 | Tekton `v1` (Task, Pipeline, PipelineRun, TaskRun) | https://github.com/datreeio/CRDs-catalog `tekton.dev/` | added for the pipeline |
+| cert-manager `v1` (Certificate, Issuer, ClusterIssuer, CertificateRequest) | datreeio CRDs-catalog `cert-manager.io/` (`schemas/cert-manager.io/SOURCE`) | for cert-manager v1.21.1 (Slice 4 zot TLS) |
 | Tekton Triggers | datreeio CRDs-catalog `triggers.tekton.dev/` | _added in the trigger slice_ |
+
+## Vendored in-cluster components (`bootstrap.sh`, checksum-pinned)
+
+| Component | Version | File | SHA-256 |
+|---|---|---|---|
+| Tekton Pipelines | v1.15.1 | `vendor/tekton/pipeline-v1.15.1.yaml` | `68da92cc…3c86` |
+| cert-manager | v1.21.1 | `vendor/cert-manager/cert-manager-v1.21.1.yaml` | `5f6a499b…e408` |
+| Tekton Chains | v0.29.0 | _applied from GitHub release during probing; vendor in the Slice 4 commit_ | — |

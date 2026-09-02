@@ -450,25 +450,32 @@ No verify task, no verify run, no EventListener (CM-1-A superseded). Chains sign
 asynchronously after the PipelineRun completes; `deploy` keeps doing
 `kubectl apply` in this slice, unchanged.
 
-**zot gets TLS — declaratively (cert-manager + trust-manager, GitOps-native).**
-No imperative cert script. `manifests/` gains:
-- a **cert-manager** self-signed `ClusterIssuer` + a `Certificate` for
-  `zot.cv-pipeline.svc.cluster.local` (auto-renewed);
-- the zot `Deployment` mounts the issued cert Secret; `configmap.yaml` gets an
-  `http.tls` block pointing at it;
-- **trust-manager** publishes the CA bundle as a `Bundle` → a ConfigMap in
-  `cv-pipeline` + `tekton-chains`, so every consumer trusts it without a
-  committed `ca.crt` or hand-maintained mounts.
+**zot gets TLS — declaratively (cert-manager, GitOps-native).** No imperative
+cert script. `manifests/` gains (all plain manifests — `kubectl apply` at
+bootstrap now, Flux-reconciled from Slice 5):
+- `manifests/cert-manager/issuers.yaml` — a self-signed `ClusterIssuer` → a CA
+  `Certificate` (`isCA`, 10y) → a **CA `ClusterIssuer`** any namespace can
+  request from;
+- `manifests/zot/certificate.yaml` — the zot serving `Certificate`
+  (`zot.cv-pipeline.svc.cluster.local`, 1y auto-renew) → Secret `zot-tls`
+  (`tls.crt` + `tls.key` + `ca.crt`);
+- `manifests/zot/deployment.yaml` mounts `zot-tls`; `configmap.yaml` gets an
+  `http.tls` block; probes go `scheme: HTTPS`;
+- `manifests/chains/ca-cert.yaml` — a `Certificate` in `tekton-chains` whose
+  Secret's `ca.crt` the Chains controller mounts (Slice 4 T2).
+- `bootstrap.sh` phase 1b installs cert-manager (v1.21.1, vendored + checksum).
 
-These are plain manifests: `kubectl apply -f manifests/` at bootstrap now,
-reconciled by Flux from Slice 5. Registry clients:
+**trust-manager was the first choice but it is helm-only** (no release YAML) —
+a per-namespace CA `Certificate` from the shared `ClusterIssuer` gets `ca.crt`
+where it is needed with no new tool. Revisit trust-manager if the count of
+CA-consuming namespaces grows.
 
 | Client | today | Slice 4 |
 |---|---|---|
-| Tekton Chains controller | **fails** (HTTPS-only client, no insecure knob) | trust-manager CA ConfigMap mounted into its trust store — the one hard requirement |
-| lifecycle `create`, trivy `scan` | `--insecure` / `CNB_INSECURE_REGISTRIES` | mount the CA ConfigMap (YAML anchor, like `&restricted-sc`); drop the insecure flags |
-| host `crane` / `oras` / `cosign` | `--insecure` | `SSL_CERT_FILE` → the exported CA, or keep `--insecure` (host-only, low stakes) |
-| OrbStack node (kubelet pull) | `docker.json` insecure-registries | **unchanged** — `insecure-registries` already means "accept an unverified TLS cert for this host", so self-signed TLS zot needs zero node changes |
+| Tekton Chains controller | **fails** (HTTPS-only client, no insecure knob) | mount `ca.crt` from the `cv-oci-ca-bundle` Secret — the one hard requirement (T2) |
+| lifecycle `create`, trivy `scan` | `--insecure` / `CNB_INSECURE_REGISTRIES` | mount `ca.crt` from the `zot-tls` Secret (YAML anchor); drop the insecure flags (T3). Until T3, the existing `--insecure` flags tolerate the self-signed cert, so e2e stays green after T1. |
+| host `crane` / `oras` / `cosign` | `--insecure` | keep `--insecure` (host-only, low stakes) or `SSL_CERT_FILE` |
+| OrbStack node (kubelet pull) | `docker.json` insecure-registries | **unchanged** — `insecure-registries` already means "accept an unverified TLS cert for this host" |
 
 **Chains config (kept from the probe run):** `artifacts.{pipelinerun,taskrun}.format
 = slsa/v2alpha4`, `storage = oci`, `storage.oci.encoding-format = sigstore-bundle`
@@ -479,7 +486,8 @@ internalParameters than `slsa-tekton`). Signer = `x509`, cosign key in
 absent** — never regenerated. **The acceptance tests read the public key from
 the live cluster** (`cosign public-key --key k8s://tekton-chains/signing-secrets`),
 never a committed file, so a re-bootstrap on a bisected checkout can't stale it.
-`bootstrap.sh` installs Chains (v0.29.0, pinned) + cert-manager + trust-manager.
+`bootstrap.sh` installs cert-manager (phase 1b, done) then Chains (v0.29.0,
+vendored — T2).
 
 **Provenance authoring (Decision 8 — real task work).** The `build` task emits, as
 typed results, the whole input closure so the SLSA predicate names it:

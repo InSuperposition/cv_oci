@@ -33,24 +33,23 @@ spec:
           image: ghcr.io/project-zot/zot-minimal-linux-arm64@${ZOT}
           args: ["serve", "/etc/zot/config.json"]
           ports:
-            - name: http
+            - name: https
               containerPort: 5000
               # No hostPort. On OrbStack the VM loopback is forwarded to the
               # Mac loopback, so a hostPort on 127.0.0.1 is unreachable from the
-              # cluster (and :5000 collides with macOS AirPlay Receiver anyway —
-              # Server: AirTunes). Instead: OrbStack routes the Kubernetes
-              # service DNS `zot.cv-pipeline.svc.cluster.local:5000` to BOTH the
-              # in-cluster network and the Mac's Docker daemon, so one address
-              # serves push (the buildpacks `create` step, via
-              # CNB_INSECURE_REGISTRIES) and pull (the kubelet). The one
-              # per-platform node step is adding that host to the daemon's
-              # insecure-registries — see docs/runbook.md.
+              # cluster (and :5000 collides with macOS AirPlay Receiver anyway).
+              # Instead: OrbStack routes `zot.cv-pipeline.svc.cluster.local:5000`
+              # to BOTH the in-cluster network and the Mac's Docker daemon, so
+              # one address serves push and pull. Slice 4: the port speaks TLS
+              # (cert-manager). The kubelet still uses the daemon's
+              # insecure-registries entry — it already means "accept an
+              # unverified cert for this host", so no node change (docs/runbook.md).
           readinessProbe:
-            httpGet: { path: /v2/, port: 5000 }
+            httpGet: { path: /v2/, port: 5000, scheme: HTTPS }
             initialDelaySeconds: 2
             periodSeconds: 5
           livenessProbe:
-            httpGet: { path: /v2/, port: 5000 }
+            httpGet: { path: /v2/, port: 5000, scheme: HTTPS }
             initialDelaySeconds: 10
             periodSeconds: 20
           securityContext:
@@ -61,6 +60,8 @@ spec:
           volumeMounts:
             - { name: storage, mountPath: /var/lib/registry }
             - { name: config, mountPath: /etc/zot }
+            # Slice 4: cert-manager-issued serving cert (manifests/zot/certificate.yaml).
+            - { name: tls, mountPath: /etc/zot-tls, readOnly: true }
       volumes:
         - name: storage
           persistentVolumeClaim:
@@ -68,3 +69,6 @@ spec:
         - name: config
           configMap:
             name: zot-config
+        - name: tls
+          secret:
+            secretName: zot-tls

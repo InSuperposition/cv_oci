@@ -147,6 +147,22 @@ trivy image --input /tmp/img.tar --format cyclonedx | jq '.components | length' 
 The verdict is reproducible: the same `(image digest, DB digest)` pair always
 gives the same answer, independent of when you run it.
 
+### zot TLS (Slice 4) — cert not ready / pods can't pull
+
+- `bootstrap.sh` waits on `certificate/cv-oci-ca` then `certificate/zot-tls`. If
+  it hangs there: `kubectl -n cert-manager describe certificate cv-oci-ca` and
+  `kubectl -n cv-pipeline describe certificate zot-tls` — usually the
+  cert-manager webhook is not up yet (`kubectl -n cert-manager get pods`).
+- zot serves HTTPS on `:5000`. `curl -k https://zot.cv-pipeline.svc.cluster.local:5000/v2/`
+  from a debug pod, or `openssl s_client -connect zot.cv-pipeline.svc.cluster.local:5000`.
+- Pipeline steps trust zot via `ca.crt` from the `zot-tls` Secret (mounted, YAML
+  anchor). The Chains controller trusts it via the `cv-oci-ca-bundle` Secret
+  (`manifests/chains/ca-cert.yaml`). The kubelet needs **no** change — the
+  daemon `insecure-registries` entry already means "accept an unverified cert".
+- Rotate the CA: `kubectl -n cert-manager delete secret cv-oci-ca` and let
+  cert-manager reissue; every leaf reissues from the new CA within `renewBefore`.
+  Consumers pick up the new `ca.crt` on the next pod restart.
+
 ### heroku/builder:24 emits no SBOM of its own
 
 - The `create` step's launch SBOM layer is a 5-byte `null` (`bom_len: 0`,

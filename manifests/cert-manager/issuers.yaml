@@ -1,0 +1,55 @@
+---
+# Slice 4 — the trust root for zot TLS. A self-signed CA, then a CA ClusterIssuer
+# any namespace can request a cert from. Declarative: applied by bootstrap.sh
+# now, reconciled by Flux from Slice 5. No openssl, no cert in git.
+#
+#   cv-oci-selfsigned (ClusterIssuer, selfSigned)
+#        │  signs
+#        ▼
+#   cv-oci-ca (Certificate, isCA)  ──►  Secret cert-manager/cv-oci-ca
+#        │                                    │
+#        ▼                                    ▼
+#   cv-oci-ca (ClusterIssuer, ca) ◄───────────┘  signs the leaf certs:
+#        ├─►  cv-pipeline/zot-tls        (manifests/zot/certificate.yaml)
+#        └─►  tekton-chains/cv-oci-ca    (manifests/chains/ca-cert.yaml)
+#
+# Every leaf Secret carries ca.crt, so consumers mount that to trust zot.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: cv-oci-selfsigned
+  labels:
+    app.kubernetes.io/part-of: cv-oci
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cv-oci-ca
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/part-of: cv-oci
+spec:
+  isCA: true
+  commonName: cv-oci-ca
+  secretName: cv-oci-ca
+  duration: 87600h      # 10y — a learning cluster, not a compliance target
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: cv-oci-selfsigned
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: cv-oci-ca
+  labels:
+    app.kubernetes.io/part-of: cv-oci
+spec:
+  ca:
+    secretName: cv-oci-ca

@@ -4,9 +4,10 @@
 # Ordered, --wait-gated, idempotent. Re-running on a ready cluster is a no-op.
 #
 #   phase 1  Tekton Pipelines v1.15.1 (vendored, checksum-pinned)
+#   phase 1b cert-manager (vendored, checksum-pinned) + the cv-oci CA issuers
 #   phase 2  feature flags: git resolver + set-security-context (Slice 1.7 PSA)
 #   phase 3  cv-pipeline namespace + RBAC + ServiceAccount
-#   phase 4  zot seed + the cv-build pipeline (docs/designs/buildpacks-pivot.md)
+#   phase 4  zot seed (TLS via cert-manager) + the cv-build pipeline
 #
 # Per-platform node trust for the CNB pull path (docs/runbook.md) is NOT done
 # here — it changes host config. phase 4 prints the two commands.
@@ -24,6 +25,10 @@ need kubectl
 TEKTON_VERSION="v1.15.1"
 TEKTON_YAML="vendor/tekton/pipeline-${TEKTON_VERSION}.yaml"
 TEKTON_SHA256="68da92cc20086184b795dae6ce425c47fe6ca3ee82b288b228bcce76bb4b3c86"
+
+CERT_MANAGER_VERSION="v1.21.1"
+CERT_MANAGER_YAML="vendor/cert-manager/cert-manager-${CERT_MANAGER_VERSION}.yaml"
+CERT_MANAGER_SHA256="5f6a499b8c1857d57f560f536e0dcc830914b45c420899fe7ad0692c8624e408"
 
 phase() { printf '\n=== phase %s: %s ===\n' "$1" "$2" >&2; }
 
@@ -52,6 +57,38 @@ kubectl wait --for=condition=Available --timeout=180s -n tekton-pipelines \
 	deploy/tekton-pipelines-controller deploy/tekton-pipelines-webhook >/dev/null
 kubectl wait --for=condition=Available --timeout=180s -n tekton-pipelines-resolvers \
 	deploy/tekton-pipelines-remote-resolvers >/dev/null
+
+# ---- phase 1b ------------------------------------------------------------
+phase 1b "cert-manager ${CERT_MANAGER_VERSION}"
+echo "${CERT_MANAGER_SHA256}  ${CERT_MANAGER_YAML}" | shasum -a 256 -c - >/dev/null \
+	|| die "cert-manager release checksum mismatch: ${CERT_MANAGER_YAML}"
+
+if kubectl get deploy/cert-manager -n cert-manager \
+	-o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}' 2>/dev/null \
+	| grep -qx "${CERT_MANAGER_VERSION}"; then
+	log_kv step=cert-manager state=already-installed version="${CERT_MANAGER_VERSION}"
+else
+	kubectl apply -f "${CERT_MANAGER_YAML}" >/dev/null
+	log_kv step=cert-manager action=applied
+fi
+
+log_kv step=cert-manager waiting=available
+kubectl wait --for=condition=Available --timeout=180s -n cert-manager \
+	deploy/cert-manager deploy/cert-manager-webhook deploy/cert-manager-cainjector >/dev/null
+# The webhook needs its own serving cert wired before it will admit our CRs.
+kubectl wait --for=condition=Established --timeout=60s \
+	crd/certificates.cert-manager.io crd/clusterissuers.cert-manager.io >/dev/null
+
+log_kv step=cert-manager action=apply-issuers
+# Retry: the webhook can 500 for a few seconds after Available while its cert
+# propagates.
+for i in 1 2 3 4 5 6; do
+	kubectl apply -f manifests/cert-manager/issuers.yaml >/dev/null 2>&1 && break
+	[ "$i" -eq 6 ] && kubectl apply -f manifests/cert-manager/issuers.yaml >/dev/null
+	sleep 5
+done
+kubectl wait --for=condition=Ready --timeout=120s -n cert-manager certificate/cv-oci-ca >/dev/null
+log_kv step=cert-manager state=ca-ready
 
 # ---- phase 2 -------------------------------------------------------------
 phase 2 "feature flags"
@@ -101,7 +138,10 @@ phase 4 "zot seed + cv-build pipeline"
 source digests.env
 [ -n "${ZOT:-}" ] || die "phase 4: images.zot not pinned in digests.cue"
 
-kubectl apply -f manifests/zot/configmap.yaml -f manifests/zot/pvc.yaml -f manifests/zot/service.yaml >/dev/null
+kubectl apply -f manifests/zot/configmap.yaml -f manifests/zot/pvc.yaml \
+	-f manifests/zot/service.yaml -f manifests/zot/certificate.yaml >/dev/null
+kubectl wait --for=condition=Ready --timeout=120s -n cv-pipeline certificate/zot-tls >/dev/null
+log_kv step=zot state=tls-cert-ready
 sed "s|\${ZOT}|${ZOT}|g" manifests/zot/deployment.yaml | kubectl apply -f - >/dev/null
 log_kv step=zot waiting=available
 kubectl -n cv-pipeline rollout status deploy/zot --timeout=120s >/dev/null
@@ -111,7 +151,10 @@ log_kv step=pipeline state=applied
 
 cat >&2 <<'NOTE'
 
-  The CNB pull path needs two one-time OrbStack node steps (docs/runbook.md):
+  The CNB pull path needs two one-time OrbStack node steps (docs/runbook.md).
+  zot now speaks TLS with a cert-manager self-signed CA; the insecure-registries
+  entry stays — it means "accept an unverified cert for this host", which is
+  what a self-signed cert is, so no CA import on the node.
     orb config set k8s.expose_services true      # then: orb stop / restart
     #  ~/.orbstack/config/docker.json:
     #  {"insecure-registries":["zot.cv-pipeline.svc.cluster.local:5000"]}

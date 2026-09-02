@@ -1,0 +1,25 @@
+---
+# Slice 4 — lands the cv-oci CA in the tekton-chains namespace so the Chains
+# controller can trust the now-TLS zot. cert-manager has no cross-namespace CA
+# copy without trust-manager (helm-only); a cert issued by the CA ClusterIssuer
+# carries ca.crt in its Secret, and that is all we mount. The tls.crt/key are
+# unused.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cv-oci-ca
+  namespace: tekton-chains
+  labels:
+    app.kubernetes.io/part-of: cv-oci
+spec:
+  secretName: cv-oci-ca-bundle
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  commonName: cv-oci-ca-trust
+  issuerRef:
+    name: cv-oci-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

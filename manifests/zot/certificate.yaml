@@ -1,0 +1,28 @@
+---
+# Slice 4 — zot's serving cert. The Secret zot-tls holds tls.crt / tls.key
+# (mounted by the zot Deployment) and ca.crt (mounted by the pipeline steps to
+# trust zot). Issued by the cv-oci-ca ClusterIssuer (manifests/cert-manager/).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: zot-tls
+  namespace: cv-pipeline
+  labels:
+    app.kubernetes.io/part-of: cv-oci
+    app.kubernetes.io/component: registry
+spec:
+  secretName: zot-tls
+  duration: 8760h        # 1y, auto-renewed
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - zot.cv-pipeline.svc.cluster.local
+    - zot.cv-pipeline.svc
+    - zot.cv-pipeline
+    - zot
+  issuerRef:
+    name: cv-oci-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

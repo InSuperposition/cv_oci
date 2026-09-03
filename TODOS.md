@@ -117,17 +117,24 @@ triggers) — this is new work not yet scheduled into a slice.
 - **Effort:** M (human) / S (CC).
 - **Depends on:** Slice 1 stable.
 
-### zot tag immutability (`http.accessControl`)
-- **What:** a zot `http.accessControl` policy on `cv` / `cv-frontend` so a
+### zot tag immutability (`http.accessControl`) + a `cv-frontend` retention policy
+- **What:** (a) a zot `http.accessControl` policy on `cv` / `cv-frontend` so a
   `PUT` to an existing tag is refused (`401`), while `create` + `delete` stay
-  open. This is the **only** zot mechanism that blocks a tag overwrite.
+  open — the **only** zot mechanism that blocks a tag overwrite; (b) a
+  `storage.retention` policy for `cv-frontend` (Slice 7 left it out — every
+  `deploy` run pushes a fresh CalVer tag and they accumulate; all point at the
+  same reproducible digest, so `keepTags` by `mostRecentlyPushedCount` +
+  `pulledWithin`, `deleteReferrers: false` so the signed artifact's referrers
+  survive). Do this repo together — both are `cv-frontend` config changes and
+  the retention counts want the immutability guarantee to reason about.
 - **Why:** anti-rollback. `OCIRepository.spec.ref.semver` + `spec.verify`
   already reject a mutated *artifact* at reconcile; this closes the narrower
   hole where a rebuild of `cv:git-<sha>` with image drift silently derefs the
   running image's manifest (the P14 incident class).
-- **Context:** was bundled with retention. **Retention shipped in Slice 7**
-  (`manifests/zot/configmap.yaml` `storage.retention`, stale-repo prefixes
-  only). Immutability was deferred by the Slice 7 eng review — on an
+- **Context:** was bundled with retention. **Stale-repo retention shipped in
+  Slice 7** (`manifests/zot/configmap.yaml` `storage.retention`, test-repo
+  prefixes only — `cv-frontend` deliberately excluded). Immutability was
+  deferred by the Slice 7 eng review — on an
   anonymous-only registry `accessControl` is a coarse ACL over *all* traffic
   including the pipeline, and it would `401` the byte-reproducible re-push of
   `cv:git-<sha>` that the `deploy-via-flux` recovery path performs. Probe P14b

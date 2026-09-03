@@ -708,13 +708,16 @@ on a healthy OrbStack (checkpoint: `orb restart` first).
           runs from the pinned `ghcr.io/fluxcd/flux-cli` image; zot's CA reaches
           it via SSL_CERT_FILE (flux push artifact v2.9.4 has no --ca-file).
           pipeline-acceptance reworked to assert the artifact + its signature;
-          a new deploy-via-flux suite asserts the reconcile. **tofu apply +
-          the full reconcile path VERIFIED on the OrbStack cluster
-          (2026-09-03):** OCIRepository SourceVerified=True on the
-          Chains-signed artifact, Kustomization applies `cv` at the built
-          @sha256, `kubectl scale` drift reverts, a byte-mutated artifact at a
-          higher CalVer → VerificationError with no revision advance. Remaining:
-          run the reworked pipeline-acceptance green end-to-end.
+          a new deploy-via-flux suite asserts the reconcile. **SHIPPED +
+          VERIFIED on the OrbStack cluster (2026-09-03):** `tofu apply` (26
+          resources, controllers 1/1); a real pipeline publishes a
+          byte-reproducible artifact, Chains signs it async, the OCIRepository
+          reaches SourceVerified=True, the Kustomization applies `cv` at the
+          built @sha256, `kubectl scale` drift reverts, a byte-mutated artifact
+          at a higher CalVer → VerificationError with no revision advance.
+          `pipeline-acceptance` GREEN with the reworked artifact assertions.
+          Not yet re-run under 5c: `build-is-reproducible` (deploy path changed
+          — a follow-up run).
     5c-B  zot htpasswd auth (anonymous pull denied) + dockerconfigjson pull
           secrets wired into every consumer; zot **tag immutability** (moved
           here from 5c-A — it is a zot-config change with the same cluster-wide

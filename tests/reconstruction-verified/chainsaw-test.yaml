@@ -9,6 +9,12 @@
 #     buildType, resolvedDependencies carries the pinned CNB builder +
 #     run-image, externalParameters names the pinned cv_frontend fixture SHA.
 #
+#   vsa — on all checks passing, a signed SLSA Verification Summary Attestation
+#     is emitted as an OCI referrer on the deployed digest (self-issued with the
+#     Chains key on this single-actor cluster) and must coexist with the Chains
+#     provenance / SBOM / verdict referrers. It is appended, not replaced, so
+#     referrers accumulate across runs — same as the Chains-side ones.
+#
 #   cross-checks — the published artifacts are internally consistent with the
 #     deployed image and the pinned inputs:
 #       - the CycloneDX SBOM referrer's component set (name/version/purl,
@@ -317,6 +323,86 @@ spec:
               oras blob fetch --insecure --output - "${zot}/cv-frontend@${lyr}" | tar -xzO \
                 | sed 's/replicas: 1/replicas: 9/' > "$deployed"
               diff "$deployed" "$fresh"
+
+    # Reaching this step means every check above passed — emit the signed VSA.
+    - name: vsa-emitted-and-coexists-with-the-chains-referrers
+      try:
+        - script:
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              img=$(kubectl -n cv-pipeline get deploy cv \
+                -o jsonpath='{.spec.template.spec.containers[0].image}')
+              digest="${img##*@}"
+              ref="${zot}/cv@${digest}"
+              vsa_type="https://slsa.dev/verification_summary/v1"
+
+              # fill the committed VSA template
+              pred=$(mktemp)
+              jq --arg u "oci://${ref}" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '.resourceUri = $u | .timeVerified = $t' \
+                tests/reconstruction-verified/vsa-predicate.json > "$pred"
+
+              # self-issued on a single-actor cluster — sign with the Chains key.
+              # cosign 3.x needs BOTH --tlog-upload=false and
+              # --use-signing-config=false to stay off the public Rekor log; a
+              # k8s:// key ref does not honour that pair, so pull the key to a
+              # file. No --replace -> the VSA is appended alongside the Chains +
+              # SBOM + verdict referrers.
+              kd=$(mktemp -d)
+              kubectl -n tekton-chains get secret signing-secrets \
+                -o jsonpath='{.data.cosign\.key}' | base64 -d > "$kd/cosign.key"
+              COSIGN_PASSWORD="$(kubectl -n tekton-chains get secret signing-secrets \
+                -o jsonpath='{.data.cosign\.password}' | base64 -d)"
+              export COSIGN_PASSWORD
+              cosign attest --key "$kd/cosign.key" --type "$vsa_type" --predicate "$pred" \
+                --allow-insecure-registry --tlog-upload=false --use-signing-config=false "$ref" >/dev/null
+
+              pub=$(mktemp)
+              cosign public-key --key k8s://tekton-chains/signing-secrets > "$pub"
+
+              # the VSA verifies and carries the expected result
+              cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true \
+                --allow-insecure-registry --type "$vsa_type" "$ref" 2>/dev/null \
+                | jq -r '.payload' | base64 -d \
+                | jq -e --arg d "${digest#sha256:}" '
+                    .subject[] | select(.digest.sha256 == $d)
+                  ' >/dev/null
+              cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true \
+                --allow-insecure-registry --type "$vsa_type" "$ref" 2>/dev/null \
+                | jq -r '.payload' | base64 -d \
+                | jq -e '
+                    .predicateType == "https://slsa.dev/verification_summary/v1"
+                    and .predicate.verificationResult == "PASSED"
+                    and (.predicate.verifiedLevels | index("SLSA_BUILD_LEVEL_3") != null)
+                  ' >/dev/null
+
+              # coexistence — the three Chains-side referrers are still there
+              refs=$(oras discover --insecure --format tree "$ref")
+              printf '%s\n' "$refs" | grep -q 'application/vnd.cyclonedx+json' \
+                || { echo "SBOM referrer gone after cosign attest" >&2; exit 1; }
+              printf '%s\n' "$refs" | grep -q 'cv-oci.cve-verdict' \
+                || { echo "CVE-verdict referrer gone after cosign attest" >&2; exit 1; }
+              # a Chains SLSA provenance attestation still verifies
+              cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true \
+                --allow-insecure-registry --type slsaprovenance1 "$ref" >/dev/null
+
+    - name: vsa-does-not-verify-under-a-foreign-key
+      try:
+        - script:
+            check:
+              ($error != null): true
+            content: |
+              set -eu
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              img=$(kubectl -n cv-pipeline get deploy cv \
+                -o jsonpath='{.spec.template.spec.containers[0].image}')
+              ref="${zot}/cv@${img##*@}"
+              foreign=$(mktemp -d)
+              ( cd "$foreign" && COSIGN_PASSWORD="" cosign generate-key-pair >/dev/null )
+              cosign verify-attestation --key "$foreign/cosign.pub" --insecure-ignore-tlog=true \
+                --allow-insecure-registry --type "https://slsa.dev/verification_summary/v1" "$ref" >/dev/null
   catch:
     - script:
         content: |

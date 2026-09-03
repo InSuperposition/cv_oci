@@ -230,3 +230,37 @@ gives the same answer, independent of when you run it.
 - **Check:** `kubectl get clusterrole cv-smoke-role cv-deploy-role`;
   `kubectl -n <test-ns> get sa,rolebinding`.
 - **Fix:** re-run `bootstrap.sh` phase 3, or `kubectl apply -f manifests/rbac.yaml`.
+
+## Slice 5b
+
+### build the render image (`zot/timoni`)
+
+Timoni ships no container image. `deploy` / `smoke` run `timoni build` from a
+vendored scratch image. Rebuild + re-push + bump `digests.cue` `timoniImage`
+on a Timoni version bump — the full `crane` sequence and the pinned inputs are
+in `vendor/render/README.md`. Needs `crane` + reachable zot
+(`kubectl -n cv-pipeline port-forward svc/zot 5000:5000` or the OrbStack route).
+`tofu/` (Slice 5c) automates this.
+
+### `deploy` / `smoke` render step fails: `modules/web-app/ missing from config-ref`
+
+- **Cause:** the `fetch-config` step checked out `cv_oci@<pipeline-ref>` and
+  `modules/web-app/` was not there. `pipeline-ref` defaults to `main`; the
+  acceptance suites pass `$(git rev-parse HEAD)`, which **must be pushed** —
+  `git fetch origin <sha>` only works for a commit reachable from a remote ref.
+- **Fix:** push the branch (or pass a `pipeline-ref` that has `modules/`).
+
+### render step fails: `stat /tmp: no such file` or a cache-dir error
+
+- **Cause:** the render image is scratch — no `/tmp`, no writable `$HOME`.
+- **Fix:** the render step sets `TMPDIR=$WS/render/tmp` (write-values `mkdir`s
+  it) and `TIMONI_CACHING=false`. If you see this, one of those was dropped.
+
+### render step: `translating TaskSpec to Pod: ... x509: certificate signed by unknown authority`
+
+- **Cause:** with no explicit `command:`, the Tekton controller does a registry
+  lookup to resolve the render image's ENTRYPOINT and cannot verify zot's
+  self-signed cert (Slice 4 T3 — CA not distributed to the Pipelines controller).
+- **Fix:** the render step is a `script:` step (explicit `#!/bin/sh` — the image
+  has a static busybox), so Tekton needs no entrypoint lookup. Do not switch it
+  to `command:`/`args:` without giving the controller the zot CA.

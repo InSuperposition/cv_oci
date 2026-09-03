@@ -677,12 +677,18 @@ on a healthy OrbStack (checkpoint: `orb restart` first).
 5a  Chainsaw adoption. Port e2e + negative + repro coverage to Chainsaw
     suites; delete scripts/test/*.sh. Same assertions, new tool. GREEN.
 
-5b  modules/web-app/ (Timoni). deploy + smoke render their manifests from
-    the module; still `kubectl apply` (no Flux yet). GREEN.
-    Probe P13: `timoni build` of one (module, values) twice → identical bytes.
-
-    ─── probes P11a / P11b / P11c / P12 run live here (Flux installed in a
-        throwaway ns), before 5c commits ───
+5b  modules/web-app/ (Timoni). deploy + smoke render from the module; still
+    `kubectl apply` (no Flux yet). **SHIPPED (2026-09-03).**
+    - Phase 1: the module + P13 (byte-deterministic — RESOLVED).
+    - Render image: no Timoni container image exists → cv_oci vendors
+      `zot/timoni` (scratch + static timoni + static busybox `/bin/sh`,
+      `crane append --oci-empty-base`; `digests.cue` timoniImage).
+    - Phase 2: delivery **C** — a `fetch-config` step git-checks-out
+      cv_oci@<pipeline-ref> (branch or SHA), keeps `modules/`; deploy + smoke
+      go 1 step → 3 (write-values → `timoni build > render/*.yaml` → apply).
+      Instance names unchanged (`cv` / `cv-smoke-<uid>`); the module only adds
+      `app.kubernetes.io/*` labels. All 6 Chainsaw suites GREEN.
+    - P11a + P11c already RESOLVED (2026-09-03, before 5c). P11b / P12 run in 5c.
 
 5c  cv_oci/tofu/ provisions Flux + the 3 Secrets + the Flux CRs. deploy's
     tail becomes `timoni build → sign → flux push artifact`; `kubectl apply`

@@ -89,29 +89,6 @@ triggers) — this is new work not yet scheduled into a slice.
 - **Effort:** S.
 - **Depends on:** a persistent cluster (same gate as portability CI).
 
-### reconstruction-verified CronJob
-- **What:** a k8s `CronJob` that runs the `tests/reconstruction-verified`
-  verification on a schedule (provenance-content assertion + SBOM / CVE /
-  manifest cross-checks + VSA emit) against the deployed `cv`, and on demand
-  via `kubectl create job --from=cronjob/...`.
-- **Why:** the Chainsaw suite proves the deployed image matches its provenance
-  at a point in time; the CronJob re-issues the VSA and catches drift (a
-  builder bump, a tampered referrer) between deploys.
-- **Context:** Slice 6 (`docs/designs/buildpacks-pivot.md`), plan task T5.
-  Deferred for the same reason as the Reproducibility CronJob — OrbStack is
-  ephemeral so it never fires — plus two Slice-6-specific costs: it needs a
-  fat runner image (kubectl + cosign + oras + jq + trivy + timoni) and a
-  ServiceAccount that can **read `tekton-chains/signing-secrets`
-  cross-namespace** to sign the VSA. The RBAC design (`manifests/rbac.yaml`)
-  deliberately grants no SA any secret access; a standing secrets-reader for a
-  CronJob that cannot run here is not worth it. The on-demand path
-  (`chainsaw test --config tests/.chainsaw.yaml tests/reconstruction-verified/`)
-  is real and green.
-- **Effort:** M (the runner image is the bulk).
-- **Depends on:** a persistent cluster (same gate as the Reproducibility
-  CronJob); a decision on the VSA signing identity (reuse the Chains key vs a
-  dedicated `cv-verify` key — ties into the `cv_openbao` arc).
-
 ### Replace bats unit tests where a declarative tool fits
 - **What:** re-home `scripts/test/*.bats` (`gen-digests` idempotence + schema,
   `validate.sh` fixture pass/fail, the `report.toml` awk parser guard) onto a

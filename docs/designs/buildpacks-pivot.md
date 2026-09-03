@@ -921,10 +921,14 @@ rebuild Pipeline, no "reconstruction" thesis.** Plan file:
   `k8s://` key ref does not honour that pair — the step pulls
   `signing-secrets/cosign.key` to a file.)
 - Runs **on demand** via `chainsaw test --config tests/.chainsaw.yaml
-  tests/reconstruction-verified/`. A scheduled `CronJob` → `TODOS.md`
-  ("reconstruction-verified CronJob") — OrbStack is ephemeral so it never
-  fires, and it would need a standing cross-namespace `signing-secrets` reader
-  that the RBAC design grants nobody.
+  tests/reconstruction-verified/`. **No scheduled `CronJob`** — on a solo
+  ephemeral OrbStack cluster it would fire never, and it would need a standing
+  cross-namespace `signing-secrets` reader that `manifests/rbac.yaml` grants
+  nobody. Continuous re-verification is meaningful only on an always-on
+  deployment with an independent verifier — it belongs to the multi-actor
+  upgrade note below, alongside full reconstruction. Between deploys the
+  running image is already pinned: Flux `spec.verify` re-checks the signature
+  every reconcile, and deploy-by-digest means it cannot silently move.
 
 Full rebuild-and-compare reconstruction is retired to a **"multi-actor /
 real-prod" design note** (below), not a TODO — it becomes worth building only
@@ -948,6 +952,14 @@ artifact without trusting this pipeline. Until then it is motion:
 in-path signature, and the Slice 6 `jq -e` assertion checks the provenance content. The
 accepted single-actor gap — "Chains signs a truthful-looking lie about the
 builder" — is a `debt.md` row with the same upgrade trigger.
+
+A **scheduled re-verification** (a `CronJob` that re-runs
+`tests/reconstruction-verified` and re-issues the VSA on a timer) belongs to
+the same upgrade: on a solo ephemeral cluster it fires never, it needs a
+standing cross-namespace `signing-secrets` reader the RBAC grants nobody, and
+between deploys the image is already pinned by digest with `spec.verify`
+re-checking every reconcile. It becomes worth it on an always-on deployment
+with an independent verifier — where the VSA also stops being self-issued.
 
 #### Probes still open (run before the slice each gates)
 
@@ -1092,7 +1104,7 @@ question was settled by the OrbStack service-DNS finding.
     digest; Flux `spec.verify` failure; a Slice 6 provenance-assertion or cross-check mismatch.
 14. **Add enforcement only after understanding verification.** manual `cosign
     verify` → Flux `spec.verify` at reconcile (Slice 5) → the Slice 6
-    provenance assertion + cross-check on demand (CronJob → TODOS) → admission control only if ever.
+    provenance assertion + cross-check on demand → admission control only if ever.
 15. **Every new dependency needs an exit test.** What exact problem it solves;
     which existing component can't; what complexity it adds; how it is removed.
 

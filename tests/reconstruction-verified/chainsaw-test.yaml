@@ -1,0 +1,112 @@
+# reconstruction-verified — the deployed cv image is what the pipeline says it is.
+#
+# Runs against the live cluster's deployed `cv` (the image the Flux Kustomization
+# rolled out into cv-pipeline, digest-pinned). Verifies the Chains SLSA
+# provenance on that exact digest and asserts its content matches the pinned
+# inputs in digests.env:
+#   - the provenance subject is the deployed digest
+#   - buildType is the Tekton Chains SLSA v2 type
+#   - resolvedDependencies carries the pinned CNB builder + run-image digests
+#   - externalParameters names the pinned cv_frontend fixture SHA
+# and that a digest absent from resolvedDependencies is rejected.
+#
+# The signature check is `cosign verify-attestation`; the content check is
+# `jq -e` in a script step (a missing key or no-match exits non-zero) — the
+# same shape as pipeline-acceptance's signature-attestation-referrers step.
+#
+# Precondition: a deployed, digest-pinned `cv` Deployment in cv-pipeline with
+# its Chains + SBOM + CVE-verdict referrers (i.e. the deploy-via-flux path has
+# run). The preflight step fails clean otherwise.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: reconstruction-verified
+spec:
+  concurrent: false
+  # Every step targets cv-pipeline explicitly; the ephemeral namespace is unused.
+  steps:
+    - name: preflight-deployed-cv-has-referrers
+      try:
+        - script:
+            content: |
+              set -eu
+              img=$(kubectl -n cv-pipeline get deploy cv \
+                -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+              case "$img" in
+                *"/cv@sha256:"*) : ;;
+                *) echo "cv Deployment absent or not digest-pinned in cv-pipeline — run the deploy-via-flux path first" >&2
+                   exit 1 ;;
+              esac
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              ref="${zot}/cv@${img##*@}"
+              refs=$(oras discover --insecure --format tree "$ref")
+              printf '%s\n' "$refs" | grep -q 'sigstore.bundle' \
+                || { echo "no Chains provenance referrer on $ref" >&2; exit 1; }
+              printf '%s\n' "$refs" | grep -q 'application/vnd.cyclonedx+json' \
+                || { echo "no SBOM referrer on $ref" >&2; exit 1; }
+              printf '%s\n' "$refs" | grep -q 'cv-oci.cve-verdict' \
+                || { echo "no CVE-verdict referrer on $ref" >&2; exit 1; }
+
+    - name: provenance-content-matches-pinned-inputs
+      try:
+        - script:
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              img=$(kubectl -n cv-pipeline get deploy cv \
+                -o jsonpath='{.spec.template.spec.containers[0].image}')
+              digest="${img##*@}"
+              ref="${zot}/cv@${digest}"
+              pub=$(mktemp)
+              cosign public-key --key k8s://tekton-chains/signing-secrets > "$pub"
+
+              # signature — the attestation verifies against the Chains key
+              cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true \
+                --allow-insecure-registry --type slsaprovenance1 "$ref" >/dev/null
+
+              pred=$(cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true \
+                --allow-insecure-registry --type slsaprovenance1 "$ref" 2>/dev/null \
+                | jq -r '.payload' | base64 -d)
+
+              # content — each assertion is jq -e: no match or missing key -> non-zero
+              printf '%s' "$pred" | jq -e --arg d "${digest#sha256:}" \
+                '.subject[] | select(.digest.sha256 == $d)' >/dev/null
+              printf '%s' "$pred" | jq -e \
+                '.predicate.buildDefinition.buildType == "https://tekton.dev/chains/v2/slsa"' >/dev/null
+              printf '%s' "$pred" | jq -e --arg b "${CNBBUILDER#sha256:}" \
+                '.predicate.buildDefinition.resolvedDependencies[] | select(.digest.sha256 == $b)' >/dev/null
+              printf '%s' "$pred" | jq -e --arg r "${CNBRUNIMAGE#sha256:}" \
+                '.predicate.buildDefinition.resolvedDependencies[] | select(.digest.sha256 == $r)' >/dev/null
+              printf '%s' "$pred" | jq -e --arg s "$FRONTEND_FIXTURE_SHA" \
+                '.predicate.buildDefinition.externalParameters.runSpec.params[]
+                   | select(.name == "APP_IMAGE") | .value | contains($s)' >/dev/null
+
+    - name: provenance-rejects-a-digest-it-does-not-contain
+      try:
+        - script:
+            check:
+              # jq -e finds no such resolvedDependency -> non-zero -> $error set
+              ($error != null): true
+            content: |
+              set -eu
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              img=$(kubectl -n cv-pipeline get deploy cv \
+                -o jsonpath='{.spec.template.spec.containers[0].image}')
+              ref="${zot}/cv@${img##*@}"
+              pub=$(mktemp)
+              cosign public-key --key k8s://tekton-chains/signing-secrets > "$pub"
+              pred=$(cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true \
+                --allow-insecure-registry --type slsaprovenance1 "$ref" 2>/dev/null \
+                | jq -r '.payload' | base64 -d)
+              printf '%s' "$pred" | jq -e \
+                '.predicate.buildDefinition.resolvedDependencies[]
+                   | select(.digest.sha256 == "0000000000000000000000000000000000000000000000000000000000000000")' >/dev/null
+  catch:
+    - script:
+        content: |
+          zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+          img=$(kubectl -n cv-pipeline get deploy cv \
+            -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+          [ -n "$img" ] && oras discover --insecure --format tree "${zot}/cv@${img##*@}" 2>/dev/null || true

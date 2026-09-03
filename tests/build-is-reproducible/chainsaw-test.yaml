@@ -97,6 +97,9 @@ spec:
     - name: both-builds-succeed-and-layer-hashes-agree
       try:
         - script:
+            # Two full CNB builds. Explicit ceiling — do not rely on the
+            # .chainsaw.yaml exec timeout (only loaded with --config).
+            timeout: 25m
             env:
               - name: NS1
                 value: ($namespace)

@@ -65,14 +65,18 @@ Gotchas found while wiring this:
 
 ## The pipeline
 
-### A `chainsaw test tests/` acceptance test fails
+### A chainsaw acceptance test fails
 
 The suite lives in `tests/` (Kyverno Chainsaw, not the forensics tool of the
 same name — see `docs/bootstrap-toolchain.md`). Each test runs the real
 `cv-build` Pipeline in its own ephemeral PSA-`restricted` namespace.
 
-- **Run one test:** `chainsaw test tests/pipeline-acceptance --config tests/.chainsaw.yaml`.
-- **Keep the namespace on failure:** `chainsaw test tests/... --skip-delete`.
+- **Always pass `--config tests/.chainsaw.yaml`.** It is not auto-discovered
+  (not even for `chainsaw test tests/`). Without it chainsaw uses defaults —
+  `ExecTimeout 5s` — and every pipeline-wait step dies with `signal: killed`
+  after ~5s. Full run: `chainsaw test --config tests/.chainsaw.yaml tests/`.
+- **Run one test:** `chainsaw test --config tests/.chainsaw.yaml tests/pipeline-acceptance/`.
+- **Keep the namespace on failure:** add `--skip-delete`.
   Then read the failing PipelineRun: `tkn -n <ns> pipelinerun logs -l
   cv-oci/acceptance-test=<test-name> --all`. Each test's `catch` block already
   dumps this on failure.

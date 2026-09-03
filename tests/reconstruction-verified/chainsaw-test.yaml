@@ -1,29 +1,41 @@
 # reconstruction-verified — the deployed cv image is what the pipeline says it is.
 #
-# Runs against the live cluster's deployed `cv` (the image the Flux Kustomization
-# rolled out into cv-pipeline, digest-pinned). Verifies the Chains SLSA
-# provenance on that exact digest and asserts its content matches the pinned
-# inputs in digests.env:
-#   - the provenance subject is the deployed digest
-#   - buildType is the Tekton Chains SLSA v2 type
-#   - resolvedDependencies carries the pinned CNB builder + run-image digests
-#   - externalParameters names the pinned cv_frontend fixture SHA
-# and that a digest absent from resolvedDependencies is rejected.
+# Runs against the live cluster's deployed `cv` (the digest-pinned image the
+# Flux Kustomization rolled out into cv-pipeline) — not a fresh build. Two
+# layers:
 #
-# The signature check is `cosign verify-attestation`; the content check is
-# `jq -e` in a script step (a missing key or no-match exits non-zero) — the
-# same shape as pipeline-acceptance's signature-attestation-referrers step.
+#   provenance — cosign verify-attestation checks the Chains SLSA signature,
+#     then the decoded predicate is asserted with `jq -e`: subject digest,
+#     buildType, resolvedDependencies carries the pinned CNB builder +
+#     run-image, externalParameters names the pinned cv_frontend fixture SHA.
+#
+#   cross-checks — the published artifacts are internally consistent with the
+#     deployed image and the pinned inputs:
+#       - the CycloneDX SBOM referrer's component set (name/version/purl,
+#         normalised — the raw bytes carry a fresh serialNumber and bom-ref
+#         UUIDs every run) matches a fresh `trivy image` scan of the digest
+#       - the CVE-verdict referrer's verdict matches a fresh scan of the app +
+#         run image against the pinned vuln-DB digest
+#       - the deployed cv-frontend manifest artifact byte-matches a fresh
+#         `timoni build` of modules/web-app/ at the deployed digest + fixture SHA
+#     each with a negative that must be caught.
+#
+# Host tools: kubectl, cosign, oras, jq, trivy, timoni, git, tar (all pinned,
+# docs/bootstrap-toolchain.md). Registry access is --insecure (self-signed zot
+# CA), same as the rest of the suite.
 #
 # Precondition: a deployed, digest-pinned `cv` Deployment in cv-pipeline with
-# its Chains + SBOM + CVE-verdict referrers (i.e. the deploy-via-flux path has
-# run). The preflight step fails clean otherwise.
+# its Chains + SBOM + CVE-verdict referrers, and the flux-system/cv-frontend
+# OCIRepository (i.e. the deploy-via-flux path has run). The preflight step
+# fails clean otherwise.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: reconstruction-verified
 spec:
   concurrent: false
-  # Every step targets cv-pipeline explicitly; the ephemeral namespace is unused.
+  # Every step targets fixed namespaces (cv-pipeline / flux-system) explicitly;
+  # the ephemeral namespace is allocated but unused.
   steps:
     - name: preflight-deployed-cv-has-referrers
       try:
@@ -37,6 +49,8 @@ spec:
                 *) echo "cv Deployment absent or not digest-pinned in cv-pipeline — run the deploy-via-flux path first" >&2
                    exit 1 ;;
               esac
+              kubectl -n flux-system get ocirepository cv-frontend >/dev/null 2>&1 \
+                || { echo "OCIRepository flux-system/cv-frontend missing — cd tofu && tofu apply, then deploy-via-flux" >&2; exit 1; }
               zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
               ref="${zot}/cv@${img##*@}"
               refs=$(oras discover --insecure --format tree "$ref")
@@ -103,6 +117,206 @@ spec:
               printf '%s' "$pred" | jq -e \
                 '.predicate.buildDefinition.resolvedDependencies[]
                    | select(.digest.sha256 == "0000000000000000000000000000000000000000000000000000000000000000")' >/dev/null
+
+    - name: xcheck-sbom-component-set-matches-deployed
+      try:
+        - script:
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              img=$(kubectl -n cv-pipeline get deploy cv \
+                -o jsonpath='{.spec.template.spec.containers[0].image}')
+              ref="${zot}/cv@${img##*@}"
+              repo="${ref%@*}"
+
+              # isolate the trivy cache so a stale host DB can't change the SBOM set
+              TCACHE=$(mktemp -d); export TRIVY_CACHE_DIR="$TCACHE"
+              trap 'rm -rf "$TCACHE"' EXIT
+              trivy image --quiet --download-db-only \
+                --db-repository "ghcr.io/aquasecurity/trivy-db@${TRIVYDB}"
+
+              fresh=$(mktemp)
+              trivy image --quiet --skip-db-update --format cyclonedx --insecure "$ref" > "$fresh"
+              # ordering + serialNumber + bom-ref UUIDs are per-run; the set is not
+              fset=$(jq -S '[.components[] | {name, version, purl}] | sort' "$fresh")
+
+              # every deployed CycloneDX referrer must carry that same set
+              n=0
+              for m in $(oras discover --insecure --format json "$ref" \
+                  | jq -r '.manifests[] | select(.artifactType == "application/vnd.cyclonedx+json") | .digest'); do
+                bl=$(oras manifest fetch --insecure "${repo}@${m}" | jq -r '.layers[0].digest')
+                dset=$(oras blob fetch --insecure --output - "${repo}@${bl}" \
+                  | jq -S '[.components[] | {name, version, purl}] | sort')
+                [ "$dset" = "$fset" ] || { echo "SBOM referrer $m: component set != fresh scan" >&2; exit 1; }
+                n=$((n + 1))
+              done
+              [ "$n" -ge 1 ] || { echo "no CycloneDX referrer found" >&2; exit 1; }
+
+    - name: xcheck-sbom-catches-a-dropped-component
+      try:
+        - script:
+            check:
+              ($error != null): true
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              img=$(kubectl -n cv-pipeline get deploy cv \
+                -o jsonpath='{.spec.template.spec.containers[0].image}')
+              ref="${zot}/cv@${img##*@}"
+              repo="${ref%@*}"
+              TCACHE=$(mktemp -d); export TRIVY_CACHE_DIR="$TCACHE"
+              trap 'rm -rf "$TCACHE"' EXIT
+              trivy image --quiet --download-db-only \
+                --db-repository "ghcr.io/aquasecurity/trivy-db@${TRIVYDB}"
+              fresh=$(mktemp)
+              trivy image --quiet --skip-db-update --format cyclonedx --insecure "$ref" > "$fresh"
+              fset=$(jq -S '[.components[] | {name, version, purl}] | sort' "$fresh")
+
+              m=$(oras discover --insecure --format json "$ref" \
+                | jq -r '[.manifests[] | select(.artifactType == "application/vnd.cyclonedx+json")][0].digest')
+              bl=$(oras manifest fetch --insecure "${repo}@${m}" | jq -r '.layers[0].digest')
+              # drop one component from the deployed set — the compare must notice
+              tampered=$(oras blob fetch --insecure --output - "${repo}@${bl}" \
+                | jq -S '[.components[1:][] | {name, version, purl}] | sort')
+              [ "$tampered" = "$fset" ]
+
+    - name: xcheck-cve-verdict-matches-deployed
+      try:
+        - script:
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env
+              # the scan step's CVE policy — keep this string identical to pipeline.yaml
+              grep -qF -- 'POLICY="--severity CRITICAL --ignore-unfixed --exit-code 1"' pipeline/pipeline.yaml
+              POLICY="--severity CRITICAL --ignore-unfixed --exit-code 1"
+
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              img=$(kubectl -n cv-pipeline get deploy cv \
+                -o jsonpath='{.spec.template.spec.containers[0].image}')
+              ref="${zot}/cv@${img##*@}"
+              repo="${ref%@*}"
+
+              v=$(oras discover --insecure --format json "$ref" \
+                | jq -r '[.manifests[] | select(.artifactType == "application/vnd.cv-oci.cve-verdict.v1+json")][0].digest')
+              vbl=$(oras manifest fetch --insecure "${repo}@${v}" | jq -r '.layers[0].digest')
+              vjson=$(oras blob fetch --insecure --output - "${repo}@${vbl}")
+              deployed=$(printf '%s' "$vjson" | jq -r '.cve_verdict')
+              run_image=$(printf '%s' "$vjson" | jq -r '.run_image')
+
+              TCACHE=$(mktemp -d); export TRIVY_CACHE_DIR="$TCACHE"
+              trap 'rm -rf "$TCACHE"' EXIT
+              trivy image --quiet --download-db-only \
+                --db-repository "ghcr.io/aquasecurity/trivy-db@${TRIVYDB}"
+
+              a=0; r=0
+              trivy image --quiet --skip-db-update $POLICY --insecure "$ref" >/dev/null || a=$?
+              trivy image --quiet --skip-db-update $POLICY "$run_image" >/dev/null || r=$?
+              rederived=pass
+              [ "$a" -eq 0 ] && [ "$r" -eq 0 ] || rederived=fail-critical
+
+              [ "$rederived" = "$deployed" ] \
+                || { echo "CVE verdict: re-derived '$rederived' != deployed '$deployed'" >&2; exit 1; }
+
+    - name: xcheck-cve-catches-a-flipped-verdict
+      try:
+        - script:
+            check:
+              ($error != null): true
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env
+              POLICY="--severity CRITICAL --ignore-unfixed --exit-code 1"
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              img=$(kubectl -n cv-pipeline get deploy cv \
+                -o jsonpath='{.spec.template.spec.containers[0].image}')
+              ref="${zot}/cv@${img##*@}"
+              repo="${ref%@*}"
+              v=$(oras discover --insecure --format json "$ref" \
+                | jq -r '[.manifests[] | select(.artifactType == "application/vnd.cv-oci.cve-verdict.v1+json")][0].digest')
+              vbl=$(oras manifest fetch --insecure "${repo}@${v}" | jq -r '.layers[0].digest')
+              run_image=$(oras blob fetch --insecure --output - "${repo}@${vbl}" | jq -r '.run_image')
+
+              TCACHE=$(mktemp -d); export TRIVY_CACHE_DIR="$TCACHE"
+              trap 'rm -rf "$TCACHE"' EXIT
+              trivy image --quiet --download-db-only \
+                --db-repository "ghcr.io/aquasecurity/trivy-db@${TRIVYDB}"
+              a=0; r=0
+              trivy image --quiet --skip-db-update $POLICY --insecure "$ref" >/dev/null || a=$?
+              trivy image --quiet --skip-db-update $POLICY "$run_image" >/dev/null || r=$?
+              rederived=pass
+              [ "$a" -eq 0 ] && [ "$r" -eq 0 ] || rederived=fail-critical
+              # a referrer that claimed the opposite verdict must not match
+              [ "$rederived" = "fail-critical" ]
+
+    - name: xcheck-manifest-matches-deployed-artifact
+      try:
+        - script:
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              img=$(kubectl -n cv-pipeline get deploy cv \
+                -o jsonpath='{.spec.template.spec.containers[0].image}')
+              digest="${img##*@}"
+
+              vals="$(mktemp -d)/values.cue"   # timoni keys the parser off the extension
+              cat > "$vals" <<EOF
+              values: {
+                image:       "${zot}/cv@${digest}"
+                appVersion:  "${FRONTEND_FIXTURE_SHA}"
+                extraLabels: {"app.kubernetes.io/part-of": "cv-oci"}
+              }
+              EOF
+              fresh=$(mktemp)
+              timoni build cv ./modules/web-app -n cv-pipeline -f "$vals" > "$fresh"
+
+              # the manifest artifact Flux actually reconciled
+              rev=$(kubectl -n flux-system get ocirepository cv-frontend \
+                -o jsonpath='{.status.artifact.revision}')
+              tag="${rev%@*}"
+              lyr=$(oras manifest fetch --insecure "${zot}/cv-frontend:${tag}" | jq -r '.layers[0].digest')
+              deployed=$(mktemp)
+              oras blob fetch --insecure --output - "${zot}/cv-frontend@${lyr}" | tar -xzO > "$deployed"
+
+              diff "$deployed" "$fresh"
+
+    - name: xcheck-manifest-catches-a-mutated-field
+      try:
+        - script:
+            check:
+              ($error != null): true
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              img=$(kubectl -n cv-pipeline get deploy cv \
+                -o jsonpath='{.spec.template.spec.containers[0].image}')
+              digest="${img##*@}"
+              vals="$(mktemp -d)/values.cue"
+              cat > "$vals" <<EOF
+              values: {
+                image:       "${zot}/cv@${digest}"
+                appVersion:  "${FRONTEND_FIXTURE_SHA}"
+                extraLabels: {"app.kubernetes.io/part-of": "cv-oci"}
+              }
+              EOF
+              fresh=$(mktemp)
+              timoni build cv ./modules/web-app -n cv-pipeline -f "$vals" > "$fresh"
+              rev=$(kubectl -n flux-system get ocirepository cv-frontend \
+                -o jsonpath='{.status.artifact.revision}')
+              lyr=$(oras manifest fetch --insecure "${zot}/cv-frontend:${rev%@*}" | jq -r '.layers[0].digest')
+              deployed=$(mktemp)
+              oras blob fetch --insecure --output - "${zot}/cv-frontend@${lyr}" | tar -xzO \
+                | sed 's/replicas: 1/replicas: 9/' > "$deployed"
+              diff "$deployed" "$fresh"
   catch:
     - script:
         content: |

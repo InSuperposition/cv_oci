@@ -49,6 +49,17 @@ fi
 step "validate.sh"
 scripts/validate.sh || fail=1
 
+if command -v tofu >/dev/null 2>&1 && git ls-files --error-unmatch tofu/ >/dev/null 2>&1; then
+	step "tofu fmt (check)"
+	tofu fmt -check -recursive tofu/ || { echo "  run: tofu fmt -recursive tofu/"; fail=1; }
+	if [ -d tofu/.terraform ]; then
+		step "tofu validate"
+		( cd tofu && tofu validate ) || fail=1
+	else
+		echo "  tofu/.terraform absent — skipping 'tofu validate' (run 'tofu init' in tofu/)"
+	fi
+fi
+
 if command -v chainsaw >/dev/null 2>&1; then
 	step "chainsaw lint (acceptance suite)"
 	chainsaw lint configuration -f tests/.chainsaw.yaml >/dev/null || fail=1

@@ -4,3 +4,9 @@ modules/*/cue.mod/gen/**   linguist-generated=true
 modules/*/cue.mod/pkg/**   linguist-generated=true
 modules/*/cue.mod/gen/**   -diff
 modules/*/cue.mod/pkg/**   -diff
+
+# Vendored Flux manifests — `flux install --export` output, then digest-pinned
+# (3 documented local edits in the file header). Collapsed in diffs; reviewed on
+# Flux version bumps.
+tofu/flux/components.yaml   linguist-generated=true
+tofu/flux/components.yaml   -diff

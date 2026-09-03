@@ -37,6 +37,9 @@ resource "kubernetes_secret" "cosign_public_key" {
     "cosign.pub" = data.kubernetes_secret.chains_signing.data["cosign.pub"]
   }
 
+  # k8s 1.24+ issues no auto SA-token Secret; don't block on one.
+  wait_for_service_account_token = false
+
   depends_on = [kubectl_manifest.flux_components]
 }
 
@@ -52,6 +55,9 @@ resource "kubernetes_secret" "zot_ca" {
   data = {
     "ca.crt" = data.kubernetes_secret.zot_tls.data["ca.crt"]
   }
+
+  # k8s 1.24+ issues no auto SA-token Secret; don't block on one.
+  wait_for_service_account_token = false
 
   depends_on = [kubectl_manifest.flux_components]
 }

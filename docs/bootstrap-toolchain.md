@@ -7,7 +7,8 @@ tests need. Pin these; a version bump is a reviewed commit (Rule 12).
 
 | Tool | Pinned version | Used for | Install |
 |---|---|---|---|
-| `cue` | v0.17.1 | `digests.cue` schema + `cue export` to `digests.env` / `params.yaml` | `brew install cue` / [releases](https://github.com/cue-lang/cue/releases) |
+| `cue` | v0.17.1 | `digests.cue` schema + `cue export` to `digests.env` / `params.yaml`; the CUE compiler behind `timoni build` (must match `modules/*/cue.mod/module.cue` `language.version`) | `brew install cue` / [releases](https://github.com/cue-lang/cue/releases) |
+| `timoni` | 0.33.0 | `timoni build` of `modules/web-app/` (Slice 5b `deploy`/`smoke` render, Slice 6 `reconstruct.sh`). Build output is byte-deterministic given `(module, values, timoni+cue versions)` — P13. A bump is a reviewed commit; re-run the P13 determinism check. | `brew install stefanprodan/tap/timoni` / [releases](https://github.com/stefanprodan/timoni/releases) |
 | `kubeconform` | v0.8.0 | offline Tekton/K8s YAML validation (`scripts/validate.sh`) | `brew install kubeconform` / [releases](https://github.com/yannh/kubeconform/releases) |
 | `kubectl` | v1.37.0 (client) | apply, `rollout status` | matches the OrbStack cluster minor |
 | `chainsaw` | 0.2.15 | the acceptance suite under `tests/` (`chainsaw test tests/`). **Kyverno Chainsaw** — a declarative K8s e2e tool; NOT the WithSecureLabs forensics tool of the same name that `brew install chainsaw` installs. | `brew install kyverno/chainsaw/chainsaw` / `go install github.com/kyverno/chainsaw@v0.2.15` |

@@ -705,15 +705,17 @@ cv_frontend push → cv_oci pipeline → build → scan → sign image (Chains, 
                                                   → Flux Kustomization → cluster
 ```
 
-**The manifest artifact.** `timoni build cv-frontend ./modules/web-app --values
-image.digest=<APP_IMAGE_DIGEST> …` renders the Deployment + Service; the deploy
+**The manifest artifact.** `timoni build cv-frontend ./modules/web-app -n
+cv-pipeline -f values.cue` (values = `{image: "<repo>@<APP_IMAGE_DIGEST>",
+appVersion: "<cv_frontend-sha>"}`) renders the Deployment + Service; the deploy
 step `flux push artifact oci://<zot>/cv-frontend:<version> --path <render-dir>
 --source <pipeline-repo-url> --revision <cv_frontend-sha>` pushes it. **Probe
-P13** confirms `timoni build` is byte-deterministic across runs (Timoni stamps
-`app.kubernetes.io/managed-by`, version labels, possibly a config checksum — the
-probe pins whether those are stable, and `reconstruct.sh` asserts against
-whatever set survives). The artifact digest is a pure function of
-`(module version, cv_frontend image digest, values)`.
+P13 RESOLVED** (2026-09-03): `timoni build` is byte-identical across runs, cache
+states, and offline; it stamps only `app.kubernetes.io/{name, version,
+managed-by=timoni}`, no timestamps or checksum. `-v` is ignored for local-path
+builds so the module takes `appVersion` explicitly. The artifact digest is a
+pure function of `(module source, timoni+cue versions, cv_frontend image digest,
+values)`.
 
 **Signing the artifact — probe-gated. P11a + P11c RESOLVED (2026-09-03, PASS):**
 - **P11a — PASS.** A Flux `OCIRepository` (source-controller v1.9.4) with
@@ -855,7 +857,7 @@ with the specific mismatch named.
 | **P11b** | Does Chains sign a `flux push artifact` media type (`application/vnd.cncf.flux.content.v1.tar+gzip`) via a `manifests_ARTIFACT_OUTPUTS` typed result? Chains' signer graph is image-manifest shaped. | Slice 5c — the "no key in pipeline" path | open — run live in 5c (needs the real `flux push artifact` flow). P11a passing means the **verify** side is solid; P11b is only about whether Chains will sign a non-image OCI artifact. |
 | **P11c** | Does Flux read the Chains `sigstore-bundle` referrer, or need the classic `sha256-<d>.sig` tag? | Slice 5c signature format | **RESOLVED (2026-09-03) — PASS, folded into P11a.** The signed image carried only a `application/vnd.dev.sigstore.bundle.v0.3+json` referrer (no `.sig` tag); Flux verified it natively. No `cosign attach` shim, no `cv-sign-sa` fallback needed for verification. |
 | **P12** | Does the `OCIRepository` reach `SourceVerified` on its own once an async signature lands (interval retry absorbs the latency), no manual reconcile? | Slice 5c deploy flow | open — run live in 5b |
-| **P13** | Is `timoni build` of one `(module, values)` byte-deterministic across runs and across a Timoni version bump? Which labels/annotations (`managed-by`, version, config checksum) does it stamp? | Slice 5b generator + Slice 6 reconstruction | open — run in 5b |
+| **P13** | Is `timoni build` of one `(module, values)` byte-deterministic across runs and across a Timoni version bump? Which labels/annotations (`managed-by`, version, config checksum) does it stamp? | Slice 5b generator + Slice 6 reconstruction | **RESOLVED (2026-09-03, `modules/web-app/` built).** `timoni build cv-frontend ./modules/web-app -n cv-pipeline -f values` is **byte-identical** across repeated runs, with the artifact cache on / off / cleared, and with **no cluster reachable** (`KUBECONFIG=/dev/null`) — `kubeVersion` resolves to a fixed default offline. **No** `creationTimestamp` / `uid` / `generation` / config-checksum in the output. Stamps exactly three labels via `timoni.sh/core/v1alpha1.#Metadata`: `app.kubernetes.io/{name=<instance>, version=<#Version>, managed-by=timoni}`. **Gotcha:** `timoni build -v <ver>` is **ignored for a local-path module** (`app.kubernetes.io/version` stays `0.0.0-devel`); the module takes an explicit `appVersion` value instead (= the cv_frontend commit SHA for `cv-frontend`). Reproduction inputs beyond module source + values: the pinned `timoni` + `cue` versions and `cue.mod/module.cue`'s `language.version` — all in `docs/bootstrap-toolchain.md`. |
 | **P6** | Chains + sigstore `hashivault://` against OpenBao — scheme? auth? | `cv_openbao` (separate repo) | provisionally resolved (docs): `hashivault://` should work against OpenBao; auth = OIDC/JWT via the Chains SA token. Live wire-up is `cv_openbao`'s first task. |
 | **P8** | Can the `slsa/v2alpha4` predicate's timestamps + run UID be normalized so two builds give an identical provenance digest? | Slice 4 reproducible provenance | **RESOLVED (T2)** — no normalize knob, but `resolvedDependencies` entries are `{uri, digest}` only. `repro.sh` asserts `subject` + the sorted materials-digest set. |
 | **P9** | Chains `storage: oci` — tag scheme or OCI 1.1 Referrers API? | Slice 4 referrer layout | **RESOLVED** — `storage.oci.encoding-format: sigstore-bundle` → Referrers API; `oras discover` sees them (verified T2). |

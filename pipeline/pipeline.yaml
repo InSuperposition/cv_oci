@@ -39,6 +39,12 @@ spec:
     # The render image: scratch + the pinned timoni CLI (digests.cue timoniImage,
     # digests.env TIMONIIMAGE). Full ref: zot/timoni@sha256:...
     - { name: render-image, type: string }
+    # Slice 5c: deploy publishes the rendered manifest as a signed OCI artifact
+    # with `flux push artifact` from the official flux CLI image (digests.cue
+    # fluxCli / digests.env FLUXCLI). deploy-artifact-repo is the bare repo the
+    # tofu-provisioned OCIRepository reconciles from — a sibling of app-repo.
+    - { name: flux-cli-image, type: string }
+    - { name: deploy-artifact-repo, type: string, default: "zot.cv-pipeline.svc.cluster.local:5000/cv-frontend" }
     - { name: app-repo, type: string, default: "zot.cv-pipeline.svc.cluster.local:5000/cv" }
     - { name: insecure-registries, type: string, default: "zot.cv-pipeline.svc.cluster.local:5000" }
     - { name: namespace, type: string, default: cv-pipeline }
@@ -53,6 +59,10 @@ spec:
     - { name: cve-verdict, value: "$(tasks.scan.results.VERDICT)" }
     - { name: cve-db-digest, value: "$(tasks.scan.results.DB_DIGEST)" }
     - { name: sbom-components, value: "$(tasks.scan.results.SBOM_COMPONENTS)" }
+    # Slice 5c: the published manifest artifact Flux reconciles.
+    - { name: manifest-artifact-url, value: "$(tasks.deploy.results.manifests_IMAGE_URL)" }
+    - { name: manifest-artifact-digest, value: "$(tasks.deploy.results.manifests_IMAGE_DIGEST)" }
+    - { name: manifest-artifact-version, value: "$(tasks.deploy.results.ARTIFACT_VERSION)" }
   tasks:
     - name: fetch
       workspaces: [{ name: source, workspace: shared }]
@@ -377,10 +387,15 @@ spec:
               kubectl -n "$NS" logs "deploy/$NAME" --tail=30 || true
               echo "smoke: /healthz never 200" >&2; exit 1
 
-    # Slice 5b: the real `cv` Deployment + Service are rendered from
-    # modules/web-app/ (instance `cv`, appVersion = the cv_frontend SHA). Same
-    # module `smoke` rendered — the smoke pass proved this exact shape one step
-    # earlier. deploy-by-digest is unchanged: the image ref is the build result.
+    # Slice 5c: deploy no longer `kubectl apply`s. It renders modules/web-app/
+    # (instance `cv`, appVersion = the cv_frontend SHA — same module `smoke`
+    # rendered) and publishes the manifest as a signed OCI artifact:
+    #   render -> flux push artifact oci://<zot>/cv-frontend:<CalVer>
+    # Tekton Chains signs that artifact async (sigstore-bundle referrer). Flux's
+    # OCIRepository (provisioned by tofu/, cosign-gated) reconciles it onto the
+    # cluster. The pipeline and Flux are decoupled: this task's contract ends at
+    # "a verified-buildable, signed artifact is published". Reconcile success is
+    # asserted by the Chainsaw acceptance suite, not polled here.
     - name: deploy
       runAfter: [smoke]
       workspaces: [{ name: source, workspace: shared }]
@@ -389,12 +404,38 @@ spec:
         - { name: image-digest, value: "$(tasks.build.results.APP_IMAGE_DIGEST)" }
         - { name: app-sha, value: "$(params.frontend-ref)" }
         - { name: namespace, value: "$(params.namespace)" }
-        - { name: pipelinerun, value: "$(context.pipelineRun.name)" }
         - { name: image, value: "$(params.kubectl-image)" }
         - { name: render-image, value: "$(params.render-image)" }
+        - { name: flux-cli-image, value: "$(params.flux-cli-image)" }
+        - { name: pipeline-repo, value: "$(params.pipeline-repo)" }
+        - { name: deploy-artifact-repo, value: "$(params.deploy-artifact-repo)" }
       taskSpec:
-        params: [{ name: image-ref }, { name: image-digest }, { name: app-sha }, { name: namespace }, { name: pipelinerun }, { name: image }, { name: render-image }]
+        params:
+          - { name: image-ref }
+          - { name: image-digest }
+          - { name: app-sha }
+          - { name: namespace }
+          - { name: image }
+          - { name: render-image }
+          - { name: flux-cli-image }
+          - { name: pipeline-repo }
+          - { name: deploy-artifact-repo }
         workspaces: [{ name: source }]
+        results:
+          # The pair Tekton Chains recognizes as a signable OCI subject (P11b):
+          # a BARE repo URL + a sha256: digest. NOT an *_ARTIFACT_OUTPUTS object.
+          - { name: manifests_IMAGE_URL, description: "bare OCI repo of the published manifest artifact" }
+          - { name: manifests_IMAGE_DIGEST, description: "sha256: digest of the published manifest artifact" }
+          - { name: ARTIFACT_VERSION, description: "CalVer tag the artifact was published under" }
+        volumes:
+          # zot serves HTTPS with a cert-manager self-signed CA. flux push
+          # artifact (v2.9.4) has no --ca-file / --tls-verify flag, so the CA is
+          # mounted and handed to the Go TLS stack via SSL_CERT_FILE. Ephemeral
+          # test namespaces get zot-tls copied in by the Chainsaw _resources.
+          - name: zot-ca
+            secret:
+              secretName: zot-tls
+              items: [{ key: ca.crt, path: ca.crt }]
         steps:
           - name: write-values
             image: $(params.image)
@@ -404,7 +445,9 @@ spec:
               set -eu
               WS="$(workspaces.source.path)"; DIG="$(params.image-digest)"
               printf '%s' "$DIG" | grep -Eqx 'sha256:[0-9a-f]{64}' || { echo "bad digest: $DIG" >&2; exit 1; }
-              mkdir -p "$WS/render/tmp"
+              # the render image is scratch+busybox — no bare `mkdir`; make the
+              # dirs here (kubectl image) so render / publish only write files.
+              mkdir -p "$WS/render/tmp" "$WS/render/artifact"
               cat > "$WS/render/deploy-values.cue" <<EOF
               values: {
                 image:       "$(params.image-ref)"
@@ -423,37 +466,51 @@ spec:
               export TMPDIR="$WS/render/tmp" TIMONI_CACHING=false
               /usr/local/bin/timoni build cv \
                 "$WS/config/modules/web-app" -n "$(params.namespace)" \
-                -f "$WS/render/deploy-values.cue" > "$WS/render/deploy.yaml"
-          - name: deploy
-            image: $(params.image)
+                -f "$WS/render/deploy-values.cue" > "$WS/render/artifact/cv-frontend.yaml"
+          - name: publish-artifact
+            image: $(params.flux-cli-image)
             securityContext: *restricted-sc  # Slice 1.7
+            # ghcr.io/fluxcd/flux-cli — busybox-based, ships /bin/sh + /bin/tar,
+            # entrypoint `flux`. A `script:` step: the shebang means no registry
+            # entrypoint lookup (Tekton can't trust the self-signed zot cert).
+            volumeMounts:
+              - { name: zot-ca, mountPath: /tls, readOnly: true }
+            env:
+              - { name: SSL_CERT_FILE, value: /tls/ca.crt }
             script: |
-              #!/usr/bin/env bash
-              set -euo pipefail
-              WS="$(workspaces.source.path)"; NS="$(params.namespace)"
-              IMG="$(params.image-ref)"; DIG="$(params.image-digest)"
-              APP_SHA="$(params.app-sha)"; PR="$(params.pipelinerun)"
-              test -s "$WS/render/deploy.yaml" || { echo "render produced no manifest" >&2; exit 1; }
-              prev="$(kubectl -n "$NS" get deploy/cv -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo none)"
-              kubectl -n "$NS" apply -f "$WS/render/deploy.yaml" >/dev/null
-              kubectl -n "$NS" rollout status deploy/cv --timeout=180s
-              url="http://cv.${NS}.svc.cluster.local/healthz"
-              code=000
-              for i in $(seq 1 10); do
-                code="$(curl -s -o /dev/null -m 15 -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
-                [ "$code" = "200" ] && break
-                echo "deploy probe $i -> $code"; sleep 3
-              done
-              [ "$code" = "200" ] || { kubectl -n "$NS" get ep cv -o wide >&2 || true; echo "deploy: /healthz -> $code" >&2; exit 1; }
-              kubectl -n "$NS" create configmap cv-deploy-state \
-                --from-literal=current_image="$IMG" \
-                --from-literal=current_digest="$DIG" \
-                --from-literal=previous="$prev" \
-                --from-literal=app_sha="$APP_SHA" \
-                --from-literal=pipelinerun="$PR" \
-                --from-literal=updated="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                --dry-run=client -o yaml | kubectl -n "$NS" apply -f - >/dev/null
-              echo "deploy: cv @ $DIG serving /healthz 200"
+              #!/bin/sh
+              set -eu
+              WS="$(workspaces.source.path)"
+              APP_SHA="$(params.app-sha)"
+              REPO="$(params.deploy-artifact-repo)"
+              test -s "$WS/render/artifact/cv-frontend.yaml" || { echo "render produced no manifest" >&2; exit 1; }
+              printf '%s' "$APP_SHA" | grep -Eqx '[0-9a-f]{40}' \
+                || { echo "deploy needs a 40-hex cv_frontend sha, got: $APP_SHA" >&2; exit 1; }
+
+              # CalVer -> semver: 0.<YYYYMMDD>.<HHMMSS>, leading zeros stripped so
+              # every part is a bare integer (semver forbids leading zeros).
+              # YYYYMMDD never has a leading zero; HHMMSS can (00:07:00 -> 700).
+              MINOR=$(date -u +%Y%m%d)
+              PATCH=$(date -u +%H%M%S | sed 's/^0*//'); PATCH=${PATCH:-0}
+              VERSION="0.${MINOR}.${PATCH}"
+
+              OUT=$(/usr/local/bin/flux push artifact \
+                "oci://${REPO}:${VERSION}" \
+                --path="$WS/render/artifact" \
+                --source="$(params.pipeline-repo)" \
+                --revision="cv-frontend@sha1:${APP_SHA}" \
+                --reproducible \
+                --output json)
+              echo "$OUT"
+
+              URL=$(printf '%s' "$OUT" | sed -n 's/.*"repository":"\([^"]*\)".*/\1/p')
+              DIG=$(printf '%s' "$OUT" | sed -n 's/.*"digest":"\(sha256:[0-9a-f]\{64\}\)".*/\1/p')
+              [ -n "$URL" ] && [ -n "$DIG" ] || { echo "could not parse flux push output" >&2; exit 1; }
+
+              printf '%s' "$URL"     > "$(results.manifests_IMAGE_URL.path)"
+              printf '%s' "$DIG"     > "$(results.manifests_IMAGE_DIGEST.path)"
+              printf '%s' "$VERSION" > "$(results.ARTIFACT_VERSION.path)"
+              echo "published ${URL}:${VERSION} @ ${DIG} — Chains signs it async"
   finally:
     - name: smoke-teardown
       params:

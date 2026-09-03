@@ -4,14 +4,15 @@
 # fixture SHA, in an ephemeral PSA-`restricted` namespace, pushing to a
 # run-scoped zot repo so it never clobbers the real `cv` image. Asserts:
 #   - the pipeline succeeds and reports an app-image-digest of sha256:<64hex>
-#   - `cv` is deployed BY that @sha256 ref, IfNotPresent, 1/1 ready; the Pod's
-#     imageID carries the built digest; the image is really in zot
 #   - Slice 3: CVE verdict is pass against the pinned trivy-db digest; SBOM >= 20 components
-#   - /healthz on the deployed Service returns 200; no run-scoped smoke leak
-#   - cv-deploy-state records digest + app-sha + PipelineRun
 #   - Slice 4: Chains signed the build TaskRun; image signature + SLSA attestation
 #     verify; provenance names the builder as a material; SBOM + verdict + bundle
 #     referrers are present; a byte-mutated copy FAILS cosign verify
+#   - Slice 5c: deploy renders modules/web-app/ and `flux push artifact`s it to
+#     <zot>/<ns>-frontend:<CalVer>; the task emits manifests_IMAGE_URL (bare) +
+#     manifests_IMAGE_DIGEST (sha256); the artifact exists in zot and Chains
+#     signs it (sigstore-bundle referrer). The Flux reconcile of that artifact
+#     is a separate suite (deploy-via-flux) — it needs the provisioned cluster.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -35,6 +36,12 @@ spec:
               . ./digests.env
               PIPELINE_REF="$(git rev-parse HEAD)"   # 5b: clone-config pulls modules/ from this SHA (must be pushed)
               APP_REPO="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/${NS}"
+              # 5c: the deploy task's `flux push artifact` step mounts ca.crt
+              # from zot-tls (SSL_CERT_FILE) — copy that one key into the
+              # ephemeral namespace.
+              kubectl create secret generic zot-tls -n "$NS" \
+                --from-literal=ca.crt="$(kubectl get secret zot-tls -n cv-pipeline -o jsonpath='{.data.ca\.crt}' | base64 -d)" \
+                --dry-run=client -o yaml | kubectl apply -n "$NS" -f - >/dev/null
               kubectl apply -n "$NS" -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
               kubectl -n "$NS" create -f - >/dev/null <<EOF
               apiVersion: tekton.dev/v1
@@ -65,9 +72,11 @@ spec:
                   - { name: frontend-repo, value: "${FRONTEND_REPO}" }
                   - { name: frontend-ref, value: "${FRONTEND_FIXTURE_SHA}" }
                   - { name: app-repo, value: "${APP_REPO}" }
+                  - { name: deploy-artifact-repo, value: "${APP_REPO}-frontend" }
                   - { name: namespace, value: "${NS}" }
                   - { name: pipeline-ref, value: "${PIPELINE_REF}" }
                   - { name: render-image, value: "${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/timoni@${TIMONIIMAGE}" }
+                  - { name: flux-cli-image, value: "ghcr.io/fluxcd/flux-cli@${FLUXCLI}" }
                 workspaces:
                   - name: shared
                     volumeClaimTemplate:
@@ -102,22 +111,10 @@ spec:
                 sleep 10
               done
 
-    - name: deployed-by-digest
+    - name: manifest-artifact-published-and-signed
       try:
-        - assert:
-            resource:
-              apiVersion: apps/v1
-              kind: Deployment
-              metadata:
-                name: cv
-              spec:
-                template:
-                  spec:
-                    (containers[0].imagePullPolicy): IfNotPresent
-                    (contains(containers[0].image, '@sha256:')): true
-              status:
-                readyReplicas: 1
         - script:
+            timeout: 6m
             env:
               - name: NS
                 value: ($namespace)
@@ -126,18 +123,36 @@ spec:
               cd "$(git rev-parse --show-toplevel)"
               . ./digests.env
               zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-              digest=$(kubectl -n "$NS" get pipelinerun -l cv-oci/acceptance-test=pipeline-acceptance \
-                -o jsonpath='{.items[0].status.results[?(@.name=="app-image-digest")].value}')
-              printf '%s' "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}'
-              want="${zot}/${NS}@${digest}"
-              img=$(kubectl -n "$NS" get deploy/cv -o jsonpath='{.spec.template.spec.containers[0].image}')
-              [ "$img" = "$want" ] || { echo "deploy image $img != $want" >&2; exit 1; }
-              pod_id=$(kubectl -n "$NS" get pod -l app=cv -o jsonpath='{.items[0].status.containerStatuses[0].imageID}')
-              case "$pod_id" in *"$digest"*) : ;; *) echo "pod imageID $pod_id missing $digest" >&2; exit 1 ;; esac
-              crane digest --insecure "$want" >/dev/null
-              prn=$(kubectl -n "$NS" get pipelinerun -l cv-oci/acceptance-test=pipeline-acceptance -o jsonpath='{.items[0].metadata.name}')
-              cm=$(kubectl -n "$NS" get cm cv-deploy-state -o jsonpath='{.data.current_digest}/{.data.app_sha}/{.data.pipelinerun}')
-              [ "$cm" = "${digest}/${FRONTEND_FIXTURE_SHA}/${prn}" ] || { echo "cv-deploy-state $cm" >&2; exit 1; }
+              pr() { kubectl -n "$NS" get pipelinerun -l cv-oci/acceptance-test=pipeline-acceptance \
+                -o jsonpath="{.items[0].status.results[?(@.name==\"$1\")].value}"; }
+
+              # deploy emitted the Chains-signable pair (P11b): bare URL + sha256.
+              url=$(pr manifest-artifact-url)
+              adigest=$(pr manifest-artifact-digest)
+              version=$(pr manifest-artifact-version)
+              [ "$url" = "${zot}/${NS}-frontend" ] || { echo "artifact url: $url" >&2; exit 1; }
+              printf '%s' "$adigest" | grep -Eqx 'sha256:[0-9a-f]{64}'
+              printf '%s' "$version" | grep -Eqx '0\.[0-9]+\.[0-9]+'
+
+              # the artifact is really in zot, tagged with the CalVer version.
+              crane digest --insecure "${url}:${version}" >/dev/null
+              [ "$(crane digest --insecure "${url}:${version}")" = "$adigest" ] \
+                || { echo "tag $version does not point at $adigest" >&2; exit 1; }
+
+              # Chains signs the artifact async — a sigstore-bundle referrer lands
+              # on its digest within a few minutes.
+              ref="${url}@${adigest}"
+              for i in $(seq 1 30); do
+                oras discover --insecure --format tree "$ref" 2>/dev/null \
+                  | grep -q 'sigstore.bundle' && break
+                [ "$i" = 30 ] && { echo "no signature referrer on $ref" >&2; oras discover --insecure --format tree "$ref" >&2; exit 1; }
+                sleep 10
+              done
+
+              # and it verifies against the Chains public key.
+              pub=$(mktemp)
+              cosign public-key --key k8s://tekton-chains/signing-secrets > "$pub"
+              cosign verify --key "$pub" --insecure-ignore-tlog=true --allow-insecure-registry "$ref" >/dev/null
 
     - name: cve-gate-and-sbom
       try:
@@ -155,20 +170,17 @@ spec:
               [ "$(prr cve-db-digest)" = "${TRIVYDB}" ]
               [ "$(prr sbom-components)" -ge 20 ]
 
-    - name: healthz-and-no-smoke-leak
+    - name: no-smoke-leak
       try:
+        # /healthz on the built image is proved by the `smoke` task inside the
+        # pipeline (one step before deploy). Here: the ephemeral smoke instance
+        # was torn down and left nothing behind.
         - script:
             env:
               - name: NS
                 value: ($namespace)
             content: |
               set -eu
-              sc='{"spec":{"containers":[{"name":"probe","securityContext":{"runAsNonRoot":true,"runAsUser":1000,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}'
-              img=$(kubectl -n "$NS" get deploy/cv -o jsonpath='{.spec.template.spec.containers[0].image}')
-              code=$(kubectl -n "$NS" run probe --image="$img" --restart=Never --rm -i --quiet --timeout=90s \
-                --override-type=strategic --overrides="$sc" --command -- \
-                curl -s -o /dev/null -m 10 -w '%{http_code}' "http://cv.${NS}.svc.cluster.local/healthz" || true)
-              [ "$code" = "200" ] || { echo "/healthz -> $code" >&2; exit 1; }
               leftover=$(kubectl -n "$NS" get deploy,svc -l cv-oci/smoke -o name | wc -l | tr -d ' ')
               [ "$leftover" = "0" ]
 

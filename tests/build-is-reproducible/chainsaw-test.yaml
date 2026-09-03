@@ -48,6 +48,9 @@ spec:
                   --clusterrole cv-smoke-role --serviceaccount "${ns}:cv-smoke-sa" >/dev/null
                 kubectl -n "$ns" create rolebinding cv-deploy-rolebinding \
                   --clusterrole cv-deploy-role --serviceaccount "${ns}:cv-deploy-sa" >/dev/null
+                # 5c: deploy's publish-artifact step mounts zot's ca.crt.
+                kubectl -n "$ns" create secret generic zot-tls \
+                  --from-literal=ca.crt="$(kubectl get secret zot-tls -n cv-pipeline -o jsonpath='{.data.ca\.crt}' | base64 -d)" >/dev/null
                 kubectl apply -n "$ns" -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
                 kubectl -n "$ns" create -f - >/dev/null <<EOF
               apiVersion: tekton.dev/v1
@@ -78,9 +81,11 @@ spec:
                   - { name: frontend-repo, value: "${FRONTEND_REPO}" }
                   - { name: frontend-ref, value: "${FRONTEND_FIXTURE_SHA}" }
                   - { name: app-repo, value: "${zot}/${ns}" }
+                  - { name: deploy-artifact-repo, value: "${zot}/${ns}-frontend" }
                   - { name: namespace, value: "${ns}" }
                   - { name: pipeline-ref, value: "${PIPELINE_REF}" }
                   - { name: render-image, value: "${zot}/timoni@${TIMONIIMAGE}" }
+                  - { name: flux-cli-image, value: "ghcr.io/fluxcd/flux-cli@${FLUXCLI}" }
                 workspaces:
                   - name: shared
                     volumeClaimTemplate:

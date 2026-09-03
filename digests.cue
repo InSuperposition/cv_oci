@@ -62,4 +62,12 @@ images: {
 	// Slice 4
 	cosignCli: ""
 	chains:    "" // ghcr.io/tektoncd/chains
+
+	// Slice 5b — the render image: a scratch image holding only the pinned
+	// Timoni CLI, used by the `deploy` / `smoke` render steps to
+	// `timoni build ./modules/web-app`. Timoni ships no image of its own;
+	// cv_oci builds one from the checksum-verified binary — see
+	// `vendor/render/README.md`. Lives in the in-cluster registry only
+	// (`zot/timoni`), so this is a bare digest, not a repo@digest ref.
+	timoniImage: "sha256:1d8af7e07438b9a13e8e566ba5b1829f7127832096f0c86252f600d5eb2eb873"
 }

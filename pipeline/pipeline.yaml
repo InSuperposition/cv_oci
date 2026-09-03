@@ -503,8 +503,10 @@ spec:
                 --output json)
               echo "$OUT"
 
-              URL=$(printf '%s' "$OUT" | sed -n 's/.*"repository":"\([^"]*\)".*/\1/p')
-              DIG=$(printf '%s' "$OUT" | sed -n 's/.*"digest":"\(sha256:[0-9a-f]\{64\}\)".*/\1/p')
+              # `flux push --output json` pretty-prints — one field per line,
+              # `"key": "value"` with a space after the colon.
+              URL=$(printf '%s\n' "$OUT" | sed -n 's/.*"repository":[[:space:]]*"\([^"]*\)".*/\1/p')
+              DIG=$(printf '%s\n' "$OUT" | sed -n 's/.*"digest":[[:space:]]*"\(sha256:[0-9a-f]\{64\}\)".*/\1/p')
               [ -n "$URL" ] && [ -n "$DIG" ] || { echo "could not parse flux push output" >&2; exit 1; }
 
               printf '%s' "$URL"     > "$(results.manifests_IMAGE_URL.path)"

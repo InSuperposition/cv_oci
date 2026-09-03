@@ -5,6 +5,41 @@ triggers) — this is new work not yet scheduled into a slice.
 
 ## P2
 
+### Tighten or retire `cv-deploy-role`
+- **What:** the `deploy` task no longer `kubectl apply`s (5c-A — Flux
+  reconciles). `cv-deploy-role` still grants Deployment/Service write from the
+  pre-Flux path. Either drop it to nothing (the task uses no cluster API) or
+  fold `cv-deploy-sa` into `cv-build-sa`.
+- **Why:** minimal viable surface area — an unused write grant is negative
+  space with a cost.
+- **Context:** Slice 5c-A. Left in place this pass to keep the diff scoped;
+  the `deploy` TaskRun still runs as `cv-deploy-sa`.
+- **Effort:** S. **Depends on:** 5c-A shipped + `deploy-via-flux` green.
+
+### `deploy-via-flux` Chainsaw suite — finish against the provisioned cluster
+- **What:** `tests/deploy-via-flux/` asserts the tofu-provisioned
+  `flux-system/cv-frontend` OCIRepository reaches `SourceVerified`, the
+  Kustomization applies `cv` into `cv-pipeline`, a `kubectl edit` is reverted
+  within one interval, and a tampered/unsigned higher-CalVer artifact →
+  `VerificationError` with no reconcile.
+- **Why:** the reconcile half of the deploy contract; `pipeline-acceptance`
+  only covers "artifact published + signed".
+- **Context:** Slice 5c-A. Deferred to after `tofu apply` so the suite is
+  written against real reconcile behavior (revision string formats, timing),
+  not blind.
+- **Effort:** M. **Depends on:** `tofu apply` run once.
+
+### Slice 5c-B — zot htpasswd auth + tag immutability
+- **What:** zot `accessControl` htpasswd (anonymous pull denied) +
+  `dockerconfigjson` pull Secrets wired into every consumer (pipeline
+  build/scan/deploy steps, kubelet node config, Flux source-controller);
+  zot tag immutability (`extensions`/retention config).
+- **Why:** anti-rollback control (b) in the design; real registry auth is a
+  supply-chain skill worth showing.
+- **Context:** Slice 5c, split out 2026-09-03 — cluster-wide blast radius,
+  wanted its own commit after the Flux path is green.
+- **Effort:** M. **Depends on:** 5c-A shipped.
+
 ### Kyverno as a portfolio demo policy
 - **What:** a single small Kyverno policy as portfolio evidence of
   admission-control knowledge — either one `validate` (e.g. `disallow-latest` /

@@ -20,7 +20,9 @@ tests need. Pin these; a version bump is a reviewed commit (Rule 12).
 | `git` | 2.55.0 | everything | system |
 | `trivy` | 0.74.0 | the `tests/cve-gate-blocks-fixable-critical` acceptance test (`trivy sbom` against the frozen fixture). The pipeline `scan` step runs the pinned `trivy` **image** (`digests.cue` `trivyCli`), not this host binary. | `brew install trivy` / [releases](https://github.com/aquasecurity/trivy/releases) |
 | `cosign` | 3.1.3 | `bootstrap.sh` phase 5 generates the Chains signing key (`cosign generate-key-pair k8s://…`, only-if-absent); `tests/pipeline-acceptance` `cosign verify` / `verify-attestation` (Slice 4). | `brew install cosign` |
-| `oras` | 1.2.3 | `tests/pipeline-acceptance` `oras discover` (Slice 4 referrers). | `brew install oras` / [releases](https://github.com/oras-project/oras/releases) |
+| `oras` | 1.2.3 | `tests/pipeline-acceptance` `oras discover` (Slice 4 referrers + the Slice 5c manifest-artifact signature). | `brew install oras` / [releases](https://github.com/oras-project/oras/releases) |
+| `tofu` | v1.12.6 | `tofu/` — provisions Flux + the seed Secrets + the `cv-frontend` Flux CRs (Slice 5c). `bootstrap.sh` stays frozen at the pre-Flux layer. `tofu init` downloads `alekc/kubectl` + `hashicorp/kubernetes`; the lock file is committed. | `brew install opentofu` / [releases](https://github.com/opentofu/opentofu/releases) |
+| `flux` | v2.9.4 (CLI) | re-vendoring `tofu/flux/components.yaml` (`flux install --export`). The pipeline `deploy` task runs `flux push artifact` from the pinned `ghcr.io/fluxcd/flux-cli` **image** (`digests.cue` `fluxCli`), not this host binary. | `brew install fluxcd/tap/flux` / [releases](https://github.com/fluxcd/flux2/releases) |
 
 ## In-cluster CRD schemas for `scripts/validate.sh`
 
@@ -41,3 +43,4 @@ are added:
 | Tekton Pipelines | v1.15.1 | `vendor/tekton/pipeline-v1.15.1.yaml` | `68da92cc…3c86` |
 | cert-manager | v1.21.1 | `vendor/cert-manager/cert-manager-v1.21.1.yaml` | `5f6a499b…e408` |
 | Tekton Chains | v0.29.0 | `vendor/tekton-chains/chains-v0.29.0.yaml` | `97d68bb6…aef2` |
+| Flux (source + kustomize controllers) | v2.9.4 | `tofu/flux/components.yaml` (`flux install --export`, then digest-pinned; applied by `tofu/`, not `bootstrap.sh`) | controller images pinned in `digests.cue` (`fluxSourceController` / `fluxKustomizeController`) |

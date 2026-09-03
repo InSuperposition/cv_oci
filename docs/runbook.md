@@ -264,3 +264,59 @@ in `vendor/render/README.md`. Needs `crane` + reachable zot
 - **Fix:** the render step is a `script:` step (explicit `#!/bin/sh` — the image
   has a static busybox), so Tekton needs no entrypoint lookup. Do not switch it
   to `command:`/`args:` without giving the controller the zot CA.
+
+## Slice 5c-A
+
+### `tofu apply` — first run
+
+Prereqs: `bootstrap.sh` has run (zot + Chains + `signing-secrets` +
+`zot-tls`). Then:
+
+```sh
+cd tofu
+tofu init      # downloads alekc/kubectl + hashicorp/kubernetes
+tofu apply
+```
+
+`tofu apply` is idempotent — re-running on a provisioned cluster is a no-op.
+`tofu destroy` removes Flux + the CRs and leaves `bootstrap.sh`'s layer intact.
+
+### `deploy` step fails: `flux push artifact ... x509: certificate signed by unknown authority`
+
+- **Cause:** the `publish-artifact` step reaches zot over HTTPS with a
+  cert-manager self-signed CA. `flux push artifact` (v2.9.4) has no `--ca-file`
+  flag — it reads the CA from `SSL_CERT_FILE`.
+- **Fix:** the step mounts `zot-tls` `ca.crt` at `/tls/ca.crt` and sets
+  `SSL_CERT_FILE=/tls/ca.crt`. In an ephemeral test namespace `zot-tls` must be
+  copied in first (the Chainsaw `pipeline-acceptance` setup does this). Do NOT
+  use `--insecure-registry` — that is plain HTTP, zot is HTTPS.
+
+### `deploy` fails: `deploy needs a 40-hex cv_frontend sha`
+
+- **Cause:** `flux push artifact --revision` needs `cv-frontend@sha1:<40-hex>`.
+  The deploy step asserts `app-sha` is a full commit SHA. A branch name or short
+  SHA fails here.
+- **Fix:** pass `frontend-ref` as a full 40-char SHA (reconstruction pins it
+  anyway). The negative suites use branch names but never reach `deploy`.
+
+### OCIRepository stuck `Ready=False [VerificationError] no matching signatures`
+
+- **Expected transient** right after a deploy: Chains signs the artifact async
+  (~15s, minutes under load). The `OCIRepository` (`interval: 1m`) self-heals
+  once the `sigstore-bundle` referrer lands (P12).
+- **If it never clears:** check `kubectl -n tekton-chains logs deploy/tekton-chains-controller`
+  for the `deploy` TaskRun — Chains only signs when the TaskRun emitted
+  `manifests_IMAGE_URL` (bare repo, no `@`) + `manifests_IMAGE_DIGEST`
+  (`sha256:…`). An `_ARTIFACT_OUTPUTS` object is silently ignored ("No image
+  subject to attest").
+- **Wrong key:** `cosign-public-key` in `flux-system` must be the current
+  `tekton-chains/signing-secrets` `cosign.pub`. `tofu apply` re-copies it.
+
+### Re-vendoring `tofu/flux/components.yaml` on a Flux bump
+
+`flux install --export --components=source-controller,kustomize-controller
+--namespace=flux-system --network-policy=true > tofu/flux/components.yaml`, then
+re-apply the three local edits documented in the file header (2 image pins from
+`digests.cue` + the `flux-system` Namespace `enforce=restricted` labels). Bump
+`digests.cue` `fluxSourceController` / `fluxKustomizeController` /
+`fluxCli` with `crane digest --platform linux/arm64` and regen.

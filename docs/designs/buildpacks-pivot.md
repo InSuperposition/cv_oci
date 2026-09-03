@@ -695,10 +695,25 @@ on a healthy OrbStack (checkpoint: `orb restart` first).
       async sig), P13 (`timoni build` deterministic). The "no signing key in
       the pipeline" path is viable.
 
-5c  cv_oci/tofu/ provisions Flux + the 3 Secrets + the Flux CRs. deploy's
-    tail becomes `timoni build → sign → flux push artifact`; `kubectl apply`
-    is gone. OCIRepository{ref.semver, verify: cosign} gates the reconcile.
-    zot tag immutability configured. GREEN.
+5c  Split into 5c-A (Flux deploy path) + 5c-B (zot auth), per scoping call
+    2026-09-03.
+    5c-A  cv_oci/tofu/ provisions Flux (source + kustomize controllers,
+          flux-system PSA enforce=restricted) + the cosign-public-key + zot-ca
+          Secrets + the cv-frontend OCIRepository{semver, verify: cosign,
+          certSecretRef} + Kustomization{prune, wait}. deploy's tail becomes
+          `timoni build → flux push artifact oci://<zot>/cv-frontend:<CalVer>`,
+          emitting manifests_IMAGE_URL (bare) + manifests_IMAGE_DIGEST (P11b);
+          `kubectl apply` is gone. The pipeline and Flux are decoupled — the
+          deploy task's contract ends at "signed artifact published". flux CLI
+          runs from the pinned `ghcr.io/fluxcd/flux-cli` image; zot's CA reaches
+          it via SSL_CERT_FILE (flux push artifact v2.9.4 has no --ca-file).
+          pipeline-acceptance reworked to assert the artifact + its signature;
+          a new deploy-via-flux suite asserts the reconcile (needs the
+          provisioned cluster). IN PROGRESS.
+    5c-B  zot htpasswd auth (anonymous pull denied) + dockerconfigjson pull
+          secrets wired into every consumer; zot **tag immutability** (moved
+          here from 5c-A — it is a zot-config change with the same cluster-wide
+          blast radius as htpasswd).
 
 6   reconstruct.sh capstone.
 ```
@@ -750,14 +765,11 @@ values)`.
   artifact reaches `SourceVerified=True` within one `spec.interval` once Chains
   signs, no manual reconcile.
 
-  If P11b had failed → an explicit signer. **Not** `cv-deploy-sa` with the private key
-  (that voids the per-stage-SA spine and "the build task has no signing
-  credentials"). Instead: a dedicated single-purpose `cv-sign-sa` whose only
-  grant is `get` on the signing key, running `cosign sign` in an isolated step;
-  or `cosign attach signature` translating the Chains bundle to the `.sig` tag.
-  Either way a `debt.md` row: the signing key is reachable from a pipeline SA
-  until `cv_openbao` transit (the SA then calls the transit sign API, holds no
-  key material).
+  The `cv-sign-sa` fallback is **not needed** — P11b + P12 passed, Chains signs
+  the artifact async and the OCIRepository self-heals. No signing key is
+  reachable from any pipeline SA; the pipeline holds no signing credentials at
+  all. (Kept here only as the recovery path if a future Chains upgrade breaks
+  async artifact signing.)
 
 **Flux.** An `OCIRepository` tracks `oci://<zot>/cv-frontend` by
 `.spec.ref.semver: ">=0.0.0"` (**never a mutable `:latest` tag**);
@@ -771,22 +783,31 @@ lands (~30–60s, minutes under load) — **P12** confirms self-heal; the runboo
 documents the transient as expected.
 
 **Deploy-path RBAC + toolchain (outside-voice finding 12):**
-- `flux` CLI (and `timoni`) pinned in `digests.cue` + `docs/bootstrap-toolchain.md`,
-  in the deploy step image.
-- The push identity (`cv-deploy-sa` or `cv-sign-sa`) needs push rights to the
-  `cv-frontend` repo path in the now-authed zot — it has none today.
-- Flux `kustomize-controller`'s SA needs RBAC to create Deployment/Service in
-  the app namespace, and its pods must be PSA-`restricted` compliant (Slice 1.7
-  gotcha: check the vendored Flux manifests, patch if needed).
+- `flux` runs from the pinned `ghcr.io/fluxcd/flux-cli` image (`digests.cue`
+  `fluxCli`); `timoni` from the `zot/timoni` render image. Both pinned in
+  `digests.cue` + `docs/bootstrap-toolchain.md`.
+- **5c-A: deploy needs no new k8s RBAC.** `flux push artifact` is registry-only
+  (no cluster API), so the decoupled deploy task touches no Flux/Deployment
+  resources — `cv-deploy-role` is now over-provisioned (it kept Deployment
+  write from the pre-Flux `kubectl apply` path); tighten or retire it in a
+  follow-up. Anonymous zot push still works (auth is 5c-B).
+- Flux `kustomize-controller` gets a cluster-wide reconciler binding from the
+  vendored `components.yaml` (`cluster-admin`-class) — enough to create
+  Deployment/Service in `cv-pipeline`. Both controllers are already
+  PSA-`restricted` compliant (verified: drop ALL, RuntimeDefault seccomp,
+  runAsNonRoot, readOnlyRootFilesystem); the vendored file adds
+  `enforce=restricted` to the `flux-system` Namespace (local edit 3).
+- **5c-B:** the push identity needs push rights to `cv-frontend` once zot is
+  htpasswd-authed.
 
-**Promotion.** The deploy push assigns a monotonic version — **CalVer from the
-PipelineRun start time** (`0.<YYYYMMDD>.<HHMMSS>` normalized to semver, or a
-committed `VERSION` file bumped as a reviewed commit; decided in 5c). Every
-verified build ships (continuous deployment). `.spec.ref.semver` means the
-resolver never selects a *lower* version — but an attacker with zot push creds
-can still push a *higher* version pointing at an old digest, so the real
-anti-rollback controls are (a) `spec.verify` (gates content regardless of tag)
-and (b) **zot tag immutability** (`extensions` config — a pushed
+**Promotion.** The deploy push assigns a monotonic version — **CalVer**
+`0.<YYYYMMDD>.<HHMMSS>` (UTC, leading zeros stripped so each part is a bare
+integer — semver forbids `08`). Decided in 5c-A: computed in the step at push
+time, no `VERSION` file. Every verified build ships (continuous deployment).
+`.spec.ref.semver` means the resolver never selects a *lower* version — but an
+attacker with zot push creds can still push a *higher* version pointing at an
+old digest, so the real anti-rollback controls are (a) `spec.verify` (gates
+content regardless of tag) and (b) **zot tag immutability** (5c-B — a pushed
 `cv-frontend:<version>` tag cannot be overwritten). Retention / GC stays with
 the existing "zot retention policy" TODO (`Depends on: Slice 6`).
 

@@ -70,4 +70,20 @@ images: {
 	// `vendor/render/README.md`. Lives in the in-cluster registry only
 	// (`zot/timoni`), so this is a bare digest, not a repo@digest ref.
 	timoniImage: "sha256:072a282e80fc5a25b80846f64d15ebe6a5037f5d81682fcbce4af8b8e52b7a48"
+
+	// --- Slice 5c — Flux CD (GitOps deploy of the cv-frontend app) ---
+
+	// ghcr.io/fluxcd/flux-cli:v2.9.4 — arm64 child. The `deploy` task's
+	// `flux-push` step runs `flux push artifact` from this image to publish the
+	// rendered Timoni manifests as a signed OCI artifact. busybox-based, ships
+	// /bin/sh + /bin/tar, entrypoint `flux`, runs uid 65534.
+	fluxCli: "sha256:9b4a59b7e8741d84a6e9a8ddba516b4272d33f44a69c89b86bbe896b1edba158"
+
+	// ghcr.io/fluxcd/source-controller:v1.9.4 and
+	// ghcr.io/fluxcd/kustomize-controller:v1.9.4 — arm64 children. Applied by
+	// `tofu/` from the vendored `tofu/flux/components.yaml`, which pins these
+	// same digests. source-controller pulls + cosign-verifies the cv-frontend
+	// OCI artifact; kustomize-controller applies it (`prune: true`).
+	fluxSourceController:    "sha256:35c742ca6061d87314a2c83545e32074d068116ae26a9d41cbc28f14e4a30ee9"
+	fluxKustomizeController: "sha256:6ee39b81d5cf08e5ad1e66aa287c314d7e485ba23dfc96e336754839c685bf76"
 }

@@ -16,19 +16,6 @@ triggers) — this is new work not yet scheduled into a slice.
   the `deploy` TaskRun still runs as `cv-deploy-sa`.
 - **Effort:** S. **Depends on:** 5c-A shipped + `deploy-via-flux` green.
 
-### `deploy-via-flux` Chainsaw suite — finish against the provisioned cluster
-- **What:** `tests/deploy-via-flux/` asserts the tofu-provisioned
-  `flux-system/cv-frontend` OCIRepository reaches `SourceVerified`, the
-  Kustomization applies `cv` into `cv-pipeline`, a `kubectl edit` is reverted
-  within one interval, and a tampered/unsigned higher-CalVer artifact →
-  `VerificationError` with no reconcile.
-- **Why:** the reconcile half of the deploy contract; `pipeline-acceptance`
-  only covers "artifact published + signed".
-- **Context:** Slice 5c-A. Deferred to after `tofu apply` so the suite is
-  written against real reconcile behavior (revision string formats, timing),
-  not blind.
-- **Effort:** M. **Depends on:** `tofu apply` run once.
-
 ### Slice 5c-B — zot htpasswd auth + tag immutability
 - **What:** zot `accessControl` htpasswd (anonymous pull denied) +
   `dockerconfigjson` pull Secrets wired into every consumer (pipeline

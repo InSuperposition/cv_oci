@@ -312,6 +312,21 @@ tofu apply
 - **Wrong key:** `cosign-public-key` in `flux-system` must be the current
   `tekton-chains/signing-secrets` `cosign.pub`. `tofu apply` re-copies it.
 
+### `tests/deploy-via-flux` — the reconcile suite
+
+Runs a real `cv-build` PipelineRun into `cv-pipeline` and drives the Flux
+reconcile (verify, apply, drift-revert, tamper-reject). Needs `tofu apply`
+first — its preflight step fails clean otherwise. Heavier than the other
+suites (~12min pipeline + Flux latency) and it mutates prod `cv-pipeline`
+state (leaves `cv` deployed). It also pushes an accumulating CalVer tag to
+`zot/cv-frontend` each run — folded into the existing zot-retention TODO.
+
+If it leaves the `OCIRepository` stuck at `VerificationError` after the
+tamper step (bad tag not cleaned):
+`crane delete --insecure zot.cv-pipeline.svc.cluster.local:5000/cv-frontend:0.99999999.0`
+then `kubectl -n flux-system annotate --overwrite ocirepository/cv-frontend
+reconcile.fluxcd.io/requestedAt="$(date +%s)"`.
+
 ### Re-vendoring `tofu/flux/components.yaml` on a Flux bump
 
 `flux install --export --components=source-controller,kustomize-controller

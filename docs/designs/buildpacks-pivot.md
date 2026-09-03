@@ -814,10 +814,15 @@ integer — semver forbids `08`). Decided in 5c-A: computed in the step at push
 time, no `VERSION` file. Every verified build ships (continuous deployment).
 `.spec.ref.semver` means the resolver never selects a *lower* version — but an
 attacker with zot push creds can still push a *higher* version pointing at an
-old digest, so the real anti-rollback controls are (a) `spec.verify` (gates
-content regardless of tag) and (b) **zot tag immutability** (5c-B — a pushed
-`cv-frontend:<version>` tag cannot be overwritten). Retention / GC stays with
-the existing "zot retention policy" TODO (`Depends on: Slice 6`).
+old digest, so the real anti-rollback control is `spec.verify` (gates content
+regardless of tag — verified live in 5c-A). **zot tag immutability** was the
+intended second control but is **deferred** (TODOS "zot tag immutability",
+gated on the Kyverno slice): on an anonymous-only registry `http.accessControl`
+is a coarse ACL over all traffic including the pipeline, and probe P14b
+(2026-09-03) showed `deleteUntagged: false` does not gate an overwrite — the
+manifest deref is inline in the PUT path. **Retention shipped in Slice 7**
+(`manifests/zot/configmap.yaml` `storage.retention`) — stale test-repo prefixes
+only; `cv` / `cv-frontend` are not under retention.
 
 **zot auth.** htpasswd — anonymous pull denied. The htpasswd Secret + the
 `dockerconfigjson` pull Secret(s) + the `chains-signing-public-key` Secret are
@@ -843,14 +848,16 @@ throwaway test namespaces are ephemeral. So the "manual `kubectl edit` is
 reverted by Flux" test and the repro CronJob run fine on the live cluster.
 
 **Acceptance (Chainsaw suites):** the deploy push lands `cv-frontend:<version>`
-in zot with an immutable tag; `timoni build` is byte-deterministic (P13);
+in zot; `timoni build` is byte-deterministic (P13);
 the artifact is signed; Flux's `OCIRepository` reaches `SourceVerified: True`
 only after `spec.verify` passes; a tampered or unsigned artifact →
 `VerificationError`, no reconcile; the rendered `cv-frontend` Deployment/Service
 is field-equivalent to today's inline `cv` Deployment (regression); the
 `kustomize-controller` reconciles `cv-frontend` to the pushed image digest;
 a manual `kubectl edit` is reverted within one interval; `cv_oci/tofu/`
-`tofu apply` is idempotent on a provisioned cluster; anonymous zot pull → 401.
+`tofu apply` is idempotent on a provisioned cluster. (The registry is anonymous
+read **and** write through Slice 7 — no auth backend; `spec.verify` +
+digest-pinning are the supply-chain controls, not registry ACLs. `debt.md`.)
 
 **Infra under GitOps — deferred plan.** When adopted (a later slice, its own
 bisect-safe commits): reconcile order `cert-manager → its issuers → zot (TLS) →
@@ -905,6 +912,8 @@ with the specific mismatch named.
 | **P9** | Chains `storage: oci` — tag scheme or OCI 1.1 Referrers API? | Slice 4 referrer layout | **RESOLVED** — `storage.oci.encoding-format: sigstore-bundle` → Referrers API; `oras discover` sees them (verified T2). |
 | **P10** | Exact `cosign verify` / `verify-attestation` invocation for a Chains `sigstore-bundle`, no Rekor. | Slice 4 verify + Slice 5 `spec.verify` | **RESOLVED (T2)** — `--type slsaprovenance1 --insecure-ignore-tlog=true --allow-insecure-registry`. |
 | **P7** | Flagger meshless (`provider: kubernetes`) — metric signal without a mesh? | a possible progressive-delivery slice, not yet planned | open |
+| **P14** | zot `http.accessControl` tag immutability — does an exact repo key beat `**`? does `PUT` to an existing tag get refused with no auth backend? | Slice 7 (immutability half) | **RESOLVED (2026-09-03) — mechanism works, adoption DEFERRED.** Exact `cv-frontend` key overrides the `**` wildcard; anon `PUT` to an existing tag → `UNAUTHORIZED: authentication required` (401-class, not 403); `create` + `delete` still allowed. But on an anonymous-only registry this is a coarse ACL over the pipeline too. → immutability → TODOS, gated on the Kyverno slice. |
+| **P14b** | zot `storage.retention` — does eviction fire, on what trigger? does `deleteUntagged: false` spare an orphaned-but-referenced manifest? off-pattern tags? `:latest` carve-out? are unmatched repos safe? | Slice 7 (retention half) | **RESOLVED (2026-09-03).** Eviction fires per-repo inside each GC pass (`GCInterval`, default 1h), `Delay: 0`; logs one `"module":"retention"` line per tag (`decision` `keep`/`delete` + `reason`). `deleteUntagged: false` does **NOT** gate a tag overwrite — the deref is inline in the manifest-PUT path (gate failed → Slice 7 reduced to stale-repo retention only). Off-pattern tags in a matched repo → deleted (`"didn't meet any tag 'patterns' rules"`). **No `:latest` carve-out.** Repos matching no policy are skipped entirely (verified: `cv` / `cv-frontend` / `timoni` untouched). |
 
 P1/P2/P3 (regctl assembly, `docker load`, zot two-address) are **dead** — the
 crane/apko assembly path they gated no longer exists, and the zot address
@@ -1038,17 +1047,27 @@ question was settled by the OrbStack service-DNS finding.
   [ALL]`, `seccompProfile: RuntimeDefault`, `automountServiceAccountToken: false`
   where not needed. Exception until Slice 1.7: the `build` task's `prepare` step
   runs uid 0 (`debt.md`).
-- **Registry auth** (Slice 5c): htpasswd on zot — anonymous pull denied. The
-  htpasswd Secret + the `dockerconfigjson` pull Secret + the
-  `chains-signing-public-key` Secret are created by `cv_oci/tofu/` (**not**
-  `bootstrap.sh` — frozen), idempotent. zot is TLS (Slice 4) so Basic-auth creds
-  are not on the wire in the clear (`debt.md` keeps the "TLS mandatory at any
-  non-loopback hop" note). zot **tag immutability** (`extensions` config) makes a
-  pushed `cv-frontend:<version>` tag un-overwritable — this plus `spec.verify` is
-  the anti-rollback control (`.spec.ref.semver` alone only blocks `:latest`
-  mutation). Release-write separation is structural: the pipeline pushes the app
-  image to `cv/` and the deployment artifact to `cv-frontend/`; a release is an
-  immutable version tag — no rebuild, no separate identity.
+- **Registry auth** — **deferred** (TODOS "Registry auth (`cv_openbao` arc)").
+  The registry is anonymous read + write (pull, `create`, `delete`) with no
+  auth backend. htpasswd + `dockerconfigjson` pull Secrets fail the same
+  solo-single-node test that parked the zot `NetworkPolicy`, and the ~8
+  credential-wiring points all change when they land — folded into `cv_openbao`
+  (OpenBao PKI + credentials). zot is TLS (Slice 4). The
+  `chains-signing-public-key` Secret is created by `cv_oci/tofu/` (**not**
+  `bootstrap.sh` — frozen), idempotent.
+- **zot tag immutability** — **deferred** (TODOS, gated on the Kyverno slice).
+  `http.accessControl` (not `extensions`) is the only zot mechanism that
+  refuses a `PUT` to an existing tag; probe P14b (2026-09-03) confirmed it
+  works but on an anonymous registry it `401`s the pipeline too, and
+  `deleteUntagged: false` does **not** substitute (the overwrite deref is
+  inline). `spec.verify` (live, 5c-A) is the anti-rollback control meanwhile.
+  Release-write separation stays structural: the pipeline pushes the app image
+  to `cv/` and the deployment artifact to `cv-frontend/`.
+- **Retention** — **shipped in Slice 7.** `manifests/zot/configmap.yaml`
+  `storage.retention`: the throw-away test-repo prefixes (`chainsaw-**` /
+  `cv-e2e-**` / `cv-neg-**` / `cv-repro-**` / `dbg-**`) keep only tags pushed
+  within `168h`. `cv` / `cv-frontend` / `timoni` match no policy and are
+  retained untouched (no `["**"]` catch-all). `tests/zot-tag-retention/`.
 - **Signing.** Chains signs the app image async (Slice 4). The `cv-frontend`
   deployment artifact is signed probe-gated (P11a/b/c): Chains async, or a
   dedicated single-purpose `cv-sign-sa` running `cosign sign` (**not**
@@ -1114,13 +1133,17 @@ question was settled by the OrbStack service-DNS finding.
     the sorted materials-digest set, not the predicate digest (T6-followup).
 12. **Slice 5 suite** (Chainsaw): `timoni build cv-frontend` twice → identical
     bytes (P13); the rendered `cv-frontend` Deployment/Service is field-equivalent
-    to today's inline `cv` Deployment (regression); the pushed
-    `cv-frontend:<version>` tag is immutable; the artifact is signed; the
+    to today's inline `cv` Deployment (regression); the artifact is signed; the
     `OCIRepository` reaches `SourceVerified: True` only after `spec.verify`
     passes; a tampered / unsigned artifact → `VerificationError`, no reconcile;
     the `kustomize-controller` reconciles `cv-frontend` to the pushed image
     digest; a manual `kubectl edit` is reverted within one interval;
-    `tofu apply` is idempotent on a provisioned cluster; anonymous zot pull → 401.
+    `tofu apply` is idempotent on a provisioned cluster.
+12a. **Slice 7 retention suite** (`tests/zot-tag-retention/`): the live zot
+    loaded the `storage.retention` policy; `pushedWithin` genuinely evicts an
+    aged tag, keeps an in-window one, and spares a repo matching no policy
+    (proven against a throw-away zot with a 5s window); the live policy's globs
+    do not match `cv` / `cv-frontend` / `timoni`.
 13. **Reconstruction test** (Slice 6, `reconstruct.sh`): given only
     `cv_frontend@SHA` + `digests.cue`, every rebuilt artifact digest matches the
     deployed state (incl. `timoni build` of the deployment artifact at the pinned
@@ -1314,7 +1337,16 @@ is one address (OrbStack service DNS + daemon `insecure-registries`).**
      `deploy` + `smoke` render from it (still `kubectl apply`), run probes
      P11a/b/c + P12 + P13; **5c** `cv_oci/tofu/` provisions Flux + Secrets + CRs,
      `deploy` → `timoni build` → sign → `flux push artifact`, `OCIRepository`
-     (`ref.semver`) + `spec.verify` gates, zot tag immutability.
+     (`ref.semver`) + `spec.verify` gates.
+   - → **Slice 7** (retention) ships before Slice 6. One
+     `manifests/zot/configmap.yaml` `storage.retention` policy — throw-away
+     test-repo prefixes only, `pushedWithin: 168h`; `cv` / `cv-frontend` /
+     `timoni` untouched. `tests/zot-tag-retention/`. Probes P14 / P14b RESOLVED;
+     tag immutability (`http.accessControl`) + registry auth deferred to TODOS
+     (immutability gated on the Kyverno slice). The eng-reviewed plan
+     ("tag immutability + retention") was reduced twice: the eng review dropped
+     immutability, then probe P14b showed `deleteUntagged: false` cannot gate an
+     overwrite, cutting Slice 7 to stale-repo retention.
      → **Slice 6** (`reconstruct.sh` capstone — the distinctive payoff).
 6. **`cv_packs` project** — separate, later, its own design doc.
 7. **`cv_openbao` project** — transit signing + Flux SOPS-via-transit + PKI.

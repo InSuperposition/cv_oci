@@ -323,7 +323,10 @@ reconcile (verify, apply, drift-revert, tamper-reject). Needs `tofu apply`
 first — its preflight step fails clean otherwise. Heavier than the other
 suites (~12min pipeline + Flux latency) and it mutates prod `cv-pipeline`
 state (leaves `cv` deployed). It also pushes an accumulating CalVer tag to
-`zot/cv-frontend` each run — folded into the existing zot-retention TODO.
+`zot/cv-frontend` each run — `cv-frontend` matches no Slice 7 retention policy,
+so these accumulate; prune manually with `crane delete` if the catalog gets
+noisy, or add a `cv-frontend` retention policy when the Kyverno/immutability
+slice reworks that repo.
 
 If it leaves the `OCIRepository` stuck at `VerificationError` after the
 tamper step (bad tag not cleaned):
@@ -339,3 +342,50 @@ re-apply the three local edits documented in the file header (2 image pins from
 `digests.cue` + the `flux-system` Namespace `enforce=restricted` labels). Bump
 `digests.cue` `fluxSourceController` / `fluxKustomizeController` /
 `fluxCli` with `crane digest --platform linux/arm64` and regen.
+
+## Slice 7
+
+### zot registry retention (`manifests/zot/configmap.yaml` `storage.retention`)
+
+One policy: the throw-away test-repo prefixes (`chainsaw-**`, `cv-e2e-**`,
+`cv-neg-**`, `cv-repro-**`, `dbg-**`) keep only tags pushed within `168h`;
+older tags (and, once untagged, their manifests + referrers) are pruned on the
+GC pass. `cv`, `cv-frontend`, `timoni` match no policy and are retained
+untouched — do **not** add a `["**"]` catch-all, it would put every real repo
+under retention.
+
+- **Applying a config change:** `kubectl -n cv-pipeline apply -f
+  manifests/zot/configmap.yaml && kubectl -n cv-pipeline rollout restart
+  deploy/zot`. The Deployment is `strategy: Recreate` on an RWO PVC — there is a
+  ~15s gap with no registry. **Only do this when no PipelineRun is active** — a
+  `Recreate` mid-run kills the `deploy` task's `flux push artifact`. Check:
+  `kubectl get pipelinerun -A` / `kubectl get taskrun -A | grep -i running`.
+- **Confirming the policy loaded:** zot logs the fully-resolved config as one
+  JSON line at startup. `kubectl -n cv-pipeline logs deploy/zot | grep
+  'configuration settings' | tail -1 | jq '.params.Storage.Retention'`. A
+  `"Policies": null` there means the ConfigMap change did not take (bad JSON →
+  crashloop, caught by `rollout status`; or the pod was not restarted).
+- **Watching retention decisions:** each pass logs one line per tag,
+  `"module":"retention"` … `"decision":"keep"|"delete"` … `"reason":"…"`.
+  Retention runs inside the GC pass (`GCInterval`, default 1h), per-repo,
+  sequentially — on a registry with ~90 accumulated test repos one pass takes
+  ~15-20 min to reach the last repos. `kubectl -n cv-pipeline logs deploy/zot |
+  grep '"module":"retention"'`.
+- **A tag overwrite still derefs the old manifest immediately** — this is inline
+  zot behaviour, not retention, and no `configmap.yaml` setting changes it
+  (`deleteUntagged: false` included). If a `crane`/`curl` retag of an in-use
+  `cv:git-<sha>` orphans the deployed manifest, recover with `chainsaw test
+  --config tests/.chainsaw.yaml tests/deploy-via-flux/` — the byte-reproducible
+  build regenerates the identical manifest.
+
+### `tests/zot-tag-retention` — the retention suite
+
+Probe shape, no PipelineRun. Asserts the live zot loaded the Slice 7 policy,
+then proves `pushedWithin` eviction against a throw-away `docker run` zot with a
+5s window (aged tag evicted, in-window tag kept, unmatched repo spared), and
+that the live policy's globs do not match `cv` / `cv-frontend` / `timoni`.
+Needs `docker` on PATH (the throw-away registry). Fast (~1 min).
+`chainsaw test --config tests/.chainsaw.yaml tests/zot-tag-retention/`.
+
+If the throw-away step leaks a container: `docker ps -a --filter
+name=zot-retention-probe` then `docker rm -f <id>`.

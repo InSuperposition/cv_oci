@@ -7,9 +7,36 @@ metadata:
     app.kubernetes.io/part-of: cv-oci
     app.kubernetes.io/component: registry
 data:
+  # Retention only names throw-away test-repo prefixes. cv / cv-frontend / timoni
+  # match no policy and are retained untouched by default — a "**" catch-all here
+  # would be actively dangerous (verified live 2026-09-03, probe P14b). Retention
+  # runs inside each GC pass (default GCInterval 1h). A tag overwrite still derefs
+  # the old manifest inline regardless of any setting here — blocking that needs
+  # http.accessControl and is a separate deferred item (see TODOS.md).
   config.json: |
     {
-      "storage": { "rootDirectory": "/var/lib/registry" },
+      "storage": {
+        "rootDirectory": "/var/lib/registry",
+        "retention": {
+          "dryRun": false,
+          "policies": [
+            {
+              "repositories": [
+                "chainsaw-**",
+                "cv-e2e-**",
+                "cv-neg-**",
+                "cv-repro-**",
+                "dbg-**"
+              ],
+              "deleteReferrers": true,
+              "deleteUntagged": true,
+              "keepTags": [
+                { "patterns": [".*"], "pushedWithin": "168h" }
+              ]
+            }
+          ]
+        }
+      },
       "http": {
         "address": "0.0.0.0",
         "port": "5000",

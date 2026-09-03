@@ -1,0 +1,153 @@
+# zot-tag-retention — Slice 7.
+#
+# Slice 7 adds one storage.retention policy to manifests/zot/configmap.yaml: the
+# throw-away test-repo prefixes (chainsaw-** / cv-e2e-** / cv-neg-** / cv-repro-**
+# / dbg-**) keep only tags pushed within 168h, everything older ages out on the
+# GC pass. cv / cv-frontend / timoni match no policy and are retained untouched.
+#
+# What this proves (probe shape — no PipelineRun):
+#   1. the policy is actually loaded by the live zot (not silently dropped)
+#   2. `pushedWithin` genuinely EVICTS aged tags, KEEPS in-window tags, and a
+#      repo matching no policy is spared — shown against a throw-away zot with a
+#      5s window so the test does not wait 168h
+#   3. the live policy's globs do not match cv / cv-frontend / timoni
+#
+# What it does NOT cover: a tag overwrite still derefs the previous manifest
+# inline regardless of retention (probe P14b.2, 2026-09-03) — blocking that needs
+# http.accessControl and is a separate deferred item (TODOS.md).
+#
+#   chainsaw test --config tests/.chainsaw.yaml tests/zot-tag-retention/
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: zot-tag-retention
+spec:
+  concurrent: false
+  # Fixed namespaces (cv-pipeline) / a throw-away docker container. Chainsaw's
+  # ephemeral namespace is allocated but unused.
+  steps:
+    - name: preflight-tools
+      try:
+        - script:
+            content: |
+              set -eu
+              for t in kubectl crane docker jq; do
+                command -v "$t" >/dev/null || { echo "need $t on PATH" >&2; exit 1; }
+              done
+
+    - name: the-live-zot-has-loaded-the-retention-policy
+      try:
+        - script:
+            content: |
+              set -eu
+              # zot echoes the fully-resolved config as one JSON line at startup.
+              echo_line=$(kubectl -n cv-pipeline logs deploy/zot --tail=-1 2>/dev/null \
+                | grep '"message":"configuration settings"' | tail -1)
+              [ -n "$echo_line" ] || { echo "no zot config echo — is zot running?" >&2; exit 1; }
+              pol=$(printf '%s' "$echo_line" \
+                | jq -c '.params.Storage.Retention.Policies // empty')
+              [ -n "$pol" ] || {
+                echo "zot has NO retention policy loaded." >&2
+                echo "apply manifests/zot/configmap.yaml and: kubectl -n cv-pipeline rollout restart deploy/zot" >&2
+                exit 1; }
+              # the stale-repo policy: the 5 globs, patterns [".*"], pushedWithin 168h (=604800e9 ns), deleteUntagged true
+              match=$(printf '%s' "$pol" | jq -c '
+                map(select(
+                  (.Repositories | sort) == ["chainsaw-**","cv-e2e-**","cv-neg-**","cv-repro-**","dbg-**"]
+                  and .DeleteUntagged == true
+                  and .KeepTags[0].Patterns == [".*"]
+                  and .KeepTags[0].PushedWithin == 604800000000000
+                )) | length')
+              [ "$match" = 1 ] || {
+                echo "live retention policy does not match the Slice 7 shape:" >&2
+                printf '%s\n' "$pol" | jq . >&2
+                exit 1; }
+
+    - name: pushedWithin-evicts-aged-tags-keeps-fresh-and-spares-unmatched-repos
+      try:
+        - script:
+            timeout: 3m
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env   # $ZOT — same image as the live registry
+
+              work=$(mktemp -d)
+              cname="zot-retention-probe-$$"
+              cleanup() { docker rm -f "$cname" >/dev/null 2>&1 || true; rm -rf "$work"; }
+              trap cleanup EXIT
+
+              cat > "$work/config.json" <<'EOF'
+              {
+                "storage": {
+                  "rootDirectory": "/var/lib/registry",
+                  "gc": true, "gcDelay": "2s", "gcInterval": "8s",
+                  "retention": {
+                    "dryRun": false,
+                    "policies": [
+                      { "repositories": ["evict-**"],
+                        "deleteReferrers": true, "deleteUntagged": true,
+                        "keepTags": [ { "patterns": [".*"], "pushedWithin": "5s" } ] },
+                      { "repositories": ["keep-**"],
+                        "deleteReferrers": true, "deleteUntagged": true,
+                        "keepTags": [ { "patterns": [".*"], "pushedWithin": "24h" } ] }
+                    ]
+                  }
+                },
+                "http": { "address": "0.0.0.0", "port": "5000" },
+                "log": { "level": "info" }
+              }
+              EOF
+
+              docker run -d --name "$cname" -p 127.0.0.1:0:5000 \
+                -v "$work/config.json":/etc/zot/config.json:ro \
+                "ghcr.io/project-zot/zot-minimal-linux-arm64@${ZOT}" \
+                serve /etc/zot/config.json >/dev/null
+              hp=$(docker port "$cname" 5000/tcp | head -1); R=${hp/0.0.0.0/127.0.0.1}
+              for i in $(seq 1 40); do curl -sf "http://${R}/v2/" >/dev/null 2>&1 && break; sleep 0.5; done
+
+              mk() { # $1 repo:tag  $2 content
+                local d; d=$(mktemp -d); printf '%s' "$2" > "$d/f"; tar -C "$d" -cf "$d/l.tar" f
+                crane append --oci-empty-base -f "$d/l.tar" -t "${R}/$1" >/dev/null 2>&1; rm -rf "$d"
+              }
+              mk evict-aged:v1     "aged-$(date +%s%N)"
+              mk keep-fresh:v1     "fresh-$(date +%s%N)"
+              mk unmatched-repo:v1 "unmatched-$(date +%s%N)"
+
+              # window is 5s, gc interval 8s — one pass after ~15s has aged evict-aged out
+              sleep 20
+
+              aged=$(crane ls "${R}/evict-aged" 2>/dev/null | tr '\n' ' ' || true)
+              fresh=$(crane ls "${R}/keep-fresh" 2>/dev/null | tr '\n' ' ' || true)
+              unm=$(crane ls "${R}/unmatched-repo" 2>/dev/null | tr '\n' ' ' || true)
+              echo "after pass: evict-aged=[$aged] keep-fresh=[$fresh] unmatched-repo=[$unm]"
+
+              [ -z "$(printf '%s' "$aged" | tr -d '[:space:]')" ] \
+                || { echo "FAIL: aged tag was NOT evicted (evict-aged=[$aged])" >&2; exit 1; }
+              printf '%s' "$fresh" | grep -qw v1 \
+                || { echo "FAIL: in-window tag keep-fresh:v1 was evicted" >&2; exit 1; }
+              printf '%s' "$unm" | grep -qw v1 \
+                || { echo "FAIL: unmatched-repo:v1 was evicted (no policy should have matched it)" >&2; exit 1; }
+
+              docker logs "$cname" 2>&1 | grep '"module":"retention"' \
+                | jq -e 'select(.repository == "evict-aged" and .decision == "delete")' >/dev/null \
+                || { echo "FAIL: no retention delete decision logged for evict-aged" >&2; exit 1; }
+
+    - name: the-live-policy-does-not-touch-cv-cv-frontend-or-timoni
+      try:
+        - script:
+            content: |
+              set -eu
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              cv=$(crane ls --insecure "${zot}/cv" 2>/dev/null | tr '\n' ' ')
+              fe=$(crane ls --insecure "${zot}/cv-frontend" 2>/dev/null | tr '\n' ' ')
+              tm=$(crane ls --insecure "${zot}/timoni" 2>/dev/null | tr '\n' ' ')
+              echo "cv=[$cv] cv-frontend=[$fe] timoni=[$tm]"
+              printf '%s' "$cv" | grep -q 'git-' || { echo "FAIL: cv lost its git-<sha> tag" >&2; exit 1; }
+              [ -n "$(printf '%s' "$fe" | tr -d '[:space:]')" ] || { echo "FAIL: cv-frontend has no tags" >&2; exit 1; }
+              [ -n "$(printf '%s' "$tm" | tr -d '[:space:]')" ] || { echo "FAIL: timoni has no tags" >&2; exit 1; }
+  catch:
+    - script:
+        content: |
+          kubectl -n cv-pipeline logs deploy/zot --tail=40 2>/dev/null | grep -i retention || true
+          docker ps -a --filter 'name=zot-retention-probe' 2>/dev/null || true

@@ -16,16 +16,19 @@ triggers) — this is new work not yet scheduled into a slice.
   the `deploy` TaskRun still runs as `cv-deploy-sa`.
 - **Effort:** S. **Depends on:** 5c-A shipped + `deploy-via-flux` green.
 
-### Slice 5c-B — zot htpasswd auth + tag immutability
+### Registry auth (`cv_openbao` arc)
 - **What:** zot `accessControl` htpasswd (anonymous pull denied) +
   `dockerconfigjson` pull Secrets wired into every consumer (pipeline
-  build/scan/deploy steps, kubelet node config, Flux source-controller);
-  zot tag immutability (`extensions`/retention config).
-- **Why:** anti-rollback control (b) in the design; real registry auth is a
-  supply-chain skill worth showing.
-- **Context:** Slice 5c, split out 2026-09-03 — cluster-wide blast radius,
-  wanted its own commit after the Flux path is green.
-- **Effort:** M. **Depends on:** 5c-A shipped.
+  build/scan/deploy steps, kubelet node config, Flux source-controller).
+- **Why:** real registry auth is a supply-chain skill worth showing.
+- **Context:** was the zot-auth half of the Slice 5c split (2026-09-03).
+  Reduced to auth only —
+  retention shipped in Slice 7; tag immutability is its own TODO below. The
+  ~8 credential-wiring points all change when htpasswd lands regardless, so
+  this fails the same solo-single-node test that parked the zot `NetworkPolicy`
+  (`docs/debt.md`) and folds into the `cv_openbao` arc (OpenBao PKI as the zot
+  issuer, credentials from transit/kv).
+- **Effort:** M. **Depends on:** `cv_openbao` repo.
 
 ### Kyverno as a portfolio demo policy
 - **What:** a single small Kyverno policy as portfolio evidence of
@@ -45,6 +48,10 @@ triggers) — this is new work not yet scheduled into a slice.
   has no home for the install until `tofu/` lands in 5c. If Kyverno returns it
   must be scoped so **production RBAC stays static YAML** — Kyverno never owns
   `cv-pipeline`'s identity. Its own slice, its own rule-15 exit test.
+- **Rides with:** "zot tag immutability (`http.accessControl`)" — the user
+  gated that item on this slice (2026-09-03), because Kyverno gives a way to
+  say "the pipeline SA may create but not overwrite a tag" as policy rather
+  than a blunt anonymous registry ACL.
 - **Effort:** M (vendored install + 1 policy + a Chainsaw test).
 - **Depends on:** P11a run (cosign-verify viability probe, Slice 5b); Slice 5c
   shipped (`tofu/` provisioning path for the install).
@@ -110,28 +117,48 @@ triggers) — this is new work not yet scheduled into a slice.
 - **Effort:** M (human) / S (CC).
 - **Depends on:** Slice 1 stable.
 
-### zot tag immutability + retention policy
-- **What:** zot `extensions` config — (a) **tag immutability** so a pushed
-  `cv-frontend:<version>` / `cv:git-<sha>` tag cannot be overwritten; (b)
-  `retention` — `keepTags` by count + age, `deleteReferrers: false` so
-  SBOM/signature/provenance referrers survive with their subjects.
-- **Why:** (a) is the real anti-rollback control for Slice 5c —
-  `OCIRepository.spec.ref.semver` alone only blocks `:latest` mutation; an
-  attacker with push creds can push a higher version pointing at an old digest,
-  but not overwrite an existing immutable tag (outside-voice finding 8, Slice 5
-  eng review). (b) — every build pushes an image; Slices 3–4 add SBOM +
-  signature + provenance referrers; nothing GCs any of it and the zot PVC fills
-  silently.
-- **Context:** retention raised in the 2026-09-01 CEO review (finding 7).
-  **Immutability lands in Slice 5c** (needed for the anti-rollback claim).
-  **Retention/GC stays Slice 6** — retention and release-alias immutability
-  interact (a promoted version must not be GC'd), so tuning it before the
-  Slice 6 aliases exist risks deleting something a later slice needs. Interim:
-  a 10Gi PVC + a `docs/runbook.md` "zot PVC full → manual GC" entry.
-- **Effort:** S.
-- **Depends on:** Slice 5c (immutability) / Slice 6 (retention).
+### zot tag immutability (`http.accessControl`)
+- **What:** a zot `http.accessControl` policy on `cv` / `cv-frontend` so a
+  `PUT` to an existing tag is refused (`401`), while `create` + `delete` stay
+  open. This is the **only** zot mechanism that blocks a tag overwrite.
+- **Why:** anti-rollback. `OCIRepository.spec.ref.semver` + `spec.verify`
+  already reject a mutated *artifact* at reconcile; this closes the narrower
+  hole where a rebuild of `cv:git-<sha>` with image drift silently derefs the
+  running image's manifest (the P14 incident class).
+- **Context:** was bundled with retention. **Retention shipped in Slice 7**
+  (`manifests/zot/configmap.yaml` `storage.retention`, stale-repo prefixes
+  only). Immutability was deferred by the Slice 7 eng review — on an
+  anonymous-only registry `accessControl` is a coarse ACL over *all* traffic
+  including the pipeline, and it would `401` the byte-reproducible re-push of
+  `cv:git-<sha>` that the `deploy-via-flux` recovery path performs. Probe P14b
+  (2026-09-03, `scratchpad`/design-doc probes table) confirmed the mechanism
+  works (exact repo key beats `**`; `PUT` existing tag → `401`) and that there
+  is **no `:latest` carve-out** and **`deleteUntagged: false` does not gate an
+  overwrite** (the deref is inline in the manifest-PUT path, not retention).
+- **Gated on:** the **Kyverno slice** landing and being planned (user, this
+  session) — Kyverno gives a place to express "the pipeline SA may create but
+  not overwrite" as admission policy instead of a blunt anonymous ACL, and
+  fixes the recovery-path conflict. See "Kyverno as a portfolio demo policy".
+- **Effort:** S (once the identity story exists).
+- **Depends on:** Kyverno slice; a rework of the `deploy-via-flux` recovery
+  path so it does not overwrite an existing tag.
 
 ## P3
+
+### `deploy-via-flux` suite scopes to `.items[0]`, not its own PipelineRun
+- **What:** `pipeline-succeeds-and-publishes-a-signed-artifact` and downstream
+  steps read `pipelinerun -l cv-oci/acceptance-test=deploy-via-flux
+  -o jsonpath='{.items[0]...}'`. PipelineRuns accumulate (fixed `cv-pipeline`
+  namespace, no per-run cleanup), so `.items[0]` can be a *prior* succeeded run
+  — the suite then passes in seconds without waiting for, or asserting against,
+  the run it just created.
+- **Why:** a real regression in the new run would not be caught.
+- **Fix:** capture the created PipelineRun name from `kubectl create -o name`
+  and select on it, or `kubectl delete pipelinerun -l … --field-selector` in a
+  preflight step.
+- **Context:** noticed 2026-09-03 during the Slice 7 T2 verify (the run it
+  spawned, `deploy-via-flux-vbkdq`, did complete + pass when checked directly).
+- **Effort:** S.
 
 ### Rule 15 exit-test scripts
 - **What:** `exit-tests/<component>.md` + a script per component that demonstrates

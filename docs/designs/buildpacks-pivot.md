@@ -688,7 +688,12 @@ on a healthy OrbStack (checkpoint: `orb restart` first).
       go 1 step → 3 (write-values → `timoni build > render/*.yaml` → apply).
       Instance names unchanged (`cv` / `cv-smoke-<uid>`); the module only adds
       `app.kubernetes.io/*` labels. All 6 Chainsaw suites GREEN.
-    - P11a + P11c already RESOLVED (2026-09-03, before 5c). P11b / P12 run in 5c.
+    - **All Slice 5 probes RESOLVED (2026-09-03):** P11a/P11c (Flux verifies
+      keyed/no-Rekor/self-signed/sigstore-bundle), P11b (Chains signs a
+      flux-artifact OCI manifest async — via `_IMAGE_URL`/`_IMAGE_DIGEST`
+      results, NOT `_ARTIFACT_OUTPUTS`), P12 (`OCIRepository` self-heals on the
+      async sig), P13 (`timoni build` deterministic). The "no signing key in
+      the pipeline" path is viable.
 
 5c  cv_oci/tofu/ provisions Flux + the 3 Secrets + the Flux CRs. deploy's
     tail becomes `timoni build → sign → flux push artifact`; `kubectl apply`
@@ -723,7 +728,7 @@ builds so the module takes `appVersion` explicitly. The artifact digest is a
 pure function of `(module source, timoni+cue versions, cv_frontend image digest,
 values)`.
 
-**Signing the artifact — probe-gated. P11a + P11c RESOLVED (2026-09-03, PASS):**
+**Signing the artifact — all probes RESOLVED (2026-09-03, PASS):**
 - **P11a — PASS.** A Flux `OCIRepository` (source-controller v1.9.4) with
   `verify: {provider: cosign, secretRef: <signing-secrets/cosign.pub>}` +
   `certSecretRef: <zot-tls/ca.crt>`, pointed at a real Chains-signed pipeline
@@ -734,16 +739,18 @@ values)`.
 - **P11c — PASS (folded into P11a).** The signed image carried only a
   `application/vnd.dev.sigstore.bundle.v0.3+json` referrer (no `.sig` tag);
   Flux read it natively.
-- **P11b — still open, runs in 5c.** Does Chains sign a `flux push artifact`
-  media type (`application/vnd.cncf.flux.content.v1.tar+gzip`) via a
-  `manifests_ARTIFACT_OUTPUTS` typed result? Chains' signer graph is built
-  around image manifests. This is the only remaining gate on the "no signing
-  key in the pipeline" path.
+- **P11b — PASS, with a correction.** Chains signs a `flux push artifact` OCI
+  image manifest async (`sigstore-bundle` referrer on the digest), **but the
+  `deploy` task must emit `manifests_IMAGE_URL` (bare repo) + `manifests_IMAGE_DIGEST`
+  (`sha256:…`)** — NOT the `manifests_ARTIFACT_OUTPUTS` object the design first
+  called for, which Chains ignores ("No image subject to attest"). So: no
+  signing key in the pipeline, Chains signs async, `deploy` emits the
+  `_IMAGE_URL`/`_IMAGE_DIGEST` pair.
+- **P12 — PASS.** An `OCIRepository` created against an as-yet-unsigned fresh
+  artifact reaches `SourceVerified=True` within one `spec.interval` once Chains
+  signs, no manual reconcile.
 
-  **P11b passes** → the `deploy` task emits `manifests_ARTIFACT_OUTPUTS =
-  {uri, digest}`; Chains signs async; no signing key in the pipeline. The
-  verify side (P11a/c) is already proven.
-  **P11b fails** → an explicit signer. **Not** `cv-deploy-sa` with the private key
+  If P11b had failed → an explicit signer. **Not** `cv-deploy-sa` with the private key
   (that voids the per-stage-SA spine and "the build task has no signing
   credentials"). Instead: a dedicated single-purpose `cv-sign-sa` whose only
   grant is `get` on the signing key, running `cosign sign` in an isolated step;
@@ -860,9 +867,9 @@ with the specific mismatch named.
 | **P4** | Can the Tekton **bundles** resolver pull task/pipeline bundles from plain-HTTP zot? | a later "tasks as OCI bundles" nicety — nothing in Slices 3–6 depends on it | open (moot once zot is TLS in Slice 4) |
 | **P5** | Flux `GitRepository.spec.verify` exact scope on a git source — commit only, or the referenced image? attestations? bounded retry? | Slice 5 | **RESOLVED (2026-09-02)** — git commit/tag signatures ONLY (PGP `.asc` / SSH `.sshpub`; modes `HEAD`/`Tag`/`TagAndHEAD`). No image, no attestation. Cosign-gating is `OCIRepository.spec.verify` only. → Slice 5 drops the git repo for a signed OCI manifest artifact. Retry is on `spec.interval`, no special backoff. |
 | **P11a** | Can Flux `OCIRepository.spec.verify` (`provider: cosign`, key mode) verify a **keyed, no-Rekor** signature against a **self-signed-TLS** registry at all? | Slice 5c — gates whether cosign is viable at all | **RESOLVED (2026-09-03) — PASS.** Flux CLI v2.9.4 / source-controller v1.9.4. An `OCIRepository` with `verify: {provider: cosign, secretRef: <signing-secrets/cosign.pub>}` + `certSecretRef: <zot-tls/ca.crt>`, pointed at a real Chains-signed pipeline image (`.../chainsaw-tender-sole@sha256:e7e789ad…`), reached `SourceVerified=True "verified signature of revision …"`. Keyed ECDSA P-256, **no Rekor** (Chains `transparency.enabled=false`), self-signed zot — all handled natively, **no `--insecure-ignore-tlog` shim, no `cosign attach`**. Negative control: wrong pubkey → `Ready=False [VerificationError] no matching signatures were found`. |
-| **P11b** | Does Chains sign a `flux push artifact` media type (`application/vnd.cncf.flux.content.v1.tar+gzip`) via a `manifests_ARTIFACT_OUTPUTS` typed result? Chains' signer graph is image-manifest shaped. | Slice 5c — the "no key in pipeline" path | open — run live in 5c (needs the real `flux push artifact` flow). P11a passing means the **verify** side is solid; P11b is only about whether Chains will sign a non-image OCI artifact. |
+| **P11b** | Does Chains sign a `flux push artifact` OCI manifest async, no key in the pipeline? | Slice 5c — the "no key in pipeline" path | **RESOLVED (2026-09-03) — PASS, WITH A DESIGN CORRECTION.** A TaskRun that `oras push`es a flux-artifact-shaped OCI **image manifest** (config `application/vnd.cncf.flux.config.v1+json` + a `application/vnd.cncf.flux.content.v1.tar+gzip` layer) and emits **`manifests_IMAGE_URL` (bare repo) + `manifests_IMAGE_DIGEST` (`sha256:…`)** → Chains uploads a `sigstore-bundle` signature referrer to the artifact digest (~15s). The `manifests_ARTIFACT_OUTPUTS` object result the design called for gives **"No image subject to attest — Skipping upload to registry"** — Chains only signs OCI subjects declared via the `_IMAGE_URL`/`_IMAGE_DIGEST` pair. So `deploy` emits that pair, not `_ARTIFACT_OUTPUTS`. |
 | **P11c** | Does Flux read the Chains `sigstore-bundle` referrer, or need the classic `sha256-<d>.sig` tag? | Slice 5c signature format | **RESOLVED (2026-09-03) — PASS, folded into P11a.** The signed image carried only a `application/vnd.dev.sigstore.bundle.v0.3+json` referrer (no `.sig` tag); Flux verified it natively. No `cosign attach` shim, no `cv-sign-sa` fallback needed for verification. |
-| **P12** | Does the `OCIRepository` reach `SourceVerified` on its own once an async signature lands (interval retry absorbs the latency), no manual reconcile? | Slice 5c deploy flow | open — run live in 5b |
+| **P12** | Does the `OCIRepository` reach `SourceVerified` on its own once an async signature lands (interval retry absorbs the latency), no manual reconcile? | Slice 5c deploy flow | **RESOLVED (2026-09-03) — PASS.** An `OCIRepository` (`interval: 20s`) created pointing at an unsigned fresh artifact reached `SourceVerified=True` within one interval, once Chains signed it async — no manual reconcile. (A `Ready` reason of `OCIArtifactLayerOperationFailed` in the probe is a test-artifact artifact — the probe pushed a bare configmap, not a real Flux `.tar.gz` layer; the signature-verify self-heal is the P12 answer.) |
 | **P13** | Is `timoni build` of one `(module, values)` byte-deterministic across runs and across a Timoni version bump? Which labels/annotations (`managed-by`, version, config checksum) does it stamp? | Slice 5b generator + Slice 6 reconstruction | **RESOLVED (2026-09-03, `modules/web-app/` built).** `timoni build cv-frontend ./modules/web-app -n cv-pipeline -f values` is **byte-identical** across repeated runs, with the artifact cache on / off / cleared, and with **no cluster reachable** (`KUBECONFIG=/dev/null`) — `kubeVersion` resolves to a fixed default offline. **No** `creationTimestamp` / `uid` / `generation` / config-checksum in the output. Stamps exactly three labels via `timoni.sh/core/v1alpha1.#Metadata`: `app.kubernetes.io/{name=<instance>, version=<#Version>, managed-by=timoni}`. **Gotcha:** `timoni build -v <ver>` is **ignored for a local-path module** (`app.kubernetes.io/version` stays `0.0.0-devel`); the module takes an explicit `appVersion` value instead (= the cv_frontend commit SHA for `cv-frontend`). Reproduction inputs beyond module source + values: the pinned `timoni` + `cue` versions and `cue.mod/module.cue`'s `language.version` — all in `docs/bootstrap-toolchain.md`. |
 | **P6** | Chains + sigstore `hashivault://` against OpenBao — scheme? auth? | `cv_openbao` (separate repo) | provisionally resolved (docs): `hashivault://` should work against OpenBao; auth = OIDC/JWT via the Chains SA token. Live wire-up is `cv_openbao`'s first task. |
 | **P8** | Can the `slsa/v2alpha4` predicate's timestamps + run UID be normalized so two builds give an identical provenance digest? | Slice 4 reproducible provenance | **RESOLVED (T2)** — no normalize knob, but `resolvedDependencies` entries are `{uri, digest}` only. `repro.sh` asserts `subject` + the sorted materials-digest set. |

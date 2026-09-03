@@ -715,23 +715,27 @@ probe pins whether those are stable, and `reconstruct.sh` asserts against
 whatever set survives). The artifact digest is a pure function of
 `(module version, cv_frontend image digest, values)`.
 
-**Signing the artifact — probe-gated.** Run three probes live in 5b before 5c:
-- **P11a** — can Flux `OCIRepository.spec.verify` (`provider: cosign`, key mode)
-  verify a **keyed, no-Rekor** signature against a **self-signed-TLS** registry
-  at all? Chains runs `transparency.enabled = false`; Slice 4 needed
-  `cosign verify --insecure-ignore-tlog=true --allow-insecure-registry`. If
-  Flux's cosign path has no equivalent knobs, the verify mechanism is dead on
-  arrival and needs rethinking (notation? a sidecar verifier?).
-- **P11b** — does Chains sign a `flux push artifact` media type
-  (`application/vnd.cncf.flux.content.v1.tar+gzip`) at all, via a
+**Signing the artifact — probe-gated. P11a + P11c RESOLVED (2026-09-03, PASS):**
+- **P11a — PASS.** A Flux `OCIRepository` (source-controller v1.9.4) with
+  `verify: {provider: cosign, secretRef: <signing-secrets/cosign.pub>}` +
+  `certSecretRef: <zot-tls/ca.crt>`, pointed at a real Chains-signed pipeline
+  image, reached `SourceVerified=True`. Keyed ECDSA P-256, **no Rekor** (Chains
+  `transparency.enabled=false`), self-signed zot — all native, **no
+  `--insecure-ignore-tlog` shim**. Wrong key → `VerificationError: no matching
+  signatures were found`. See the probes table.
+- **P11c — PASS (folded into P11a).** The signed image carried only a
+  `application/vnd.dev.sigstore.bundle.v0.3+json` referrer (no `.sig` tag);
+  Flux read it natively.
+- **P11b — still open, runs in 5c.** Does Chains sign a `flux push artifact`
+  media type (`application/vnd.cncf.flux.content.v1.tar+gzip`) via a
   `manifests_ARTIFACT_OUTPUTS` typed result? Chains' signer graph is built
-  around image manifests.
-- **P11c** — if P11a+P11b pass: does Flux read the Chains `sigstore-bundle`
-  referrer, or does it need the classic `sha256-<digest>.sig` tag?
+  around image manifests. This is the only remaining gate on the "no signing
+  key in the pipeline" path.
 
-  **P11a+b+c all pass** → the `deploy` task emits `manifests_ARTIFACT_OUTPUTS =
-  {uri, digest}`; Chains signs async; no signing key in the pipeline.
-  **Any fail** → an explicit signer. **Not** `cv-deploy-sa` with the private key
+  **P11b passes** → the `deploy` task emits `manifests_ARTIFACT_OUTPUTS =
+  {uri, digest}`; Chains signs async; no signing key in the pipeline. The
+  verify side (P11a/c) is already proven.
+  **P11b fails** → an explicit signer. **Not** `cv-deploy-sa` with the private key
   (that voids the per-stage-SA spine and "the build task has no signing
   credentials"). Instead: a dedicated single-purpose `cv-sign-sa` whose only
   grant is `get` on the signing key, running `cosign sign` in an isolated step;
@@ -847,9 +851,9 @@ with the specific mismatch named.
 |---|---|---|---|
 | **P4** | Can the Tekton **bundles** resolver pull task/pipeline bundles from plain-HTTP zot? | a later "tasks as OCI bundles" nicety — nothing in Slices 3–6 depends on it | open (moot once zot is TLS in Slice 4) |
 | **P5** | Flux `GitRepository.spec.verify` exact scope on a git source — commit only, or the referenced image? attestations? bounded retry? | Slice 5 | **RESOLVED (2026-09-02)** — git commit/tag signatures ONLY (PGP `.asc` / SSH `.sshpub`; modes `HEAD`/`Tag`/`TagAndHEAD`). No image, no attestation. Cosign-gating is `OCIRepository.spec.verify` only. → Slice 5 drops the git repo for a signed OCI manifest artifact. Retry is on `spec.interval`, no special backoff. |
-| **P11a** | Can Flux `OCIRepository.spec.verify` (`provider: cosign`, key mode) verify a **keyed, no-Rekor** signature against a **self-signed-TLS** registry at all? Chains runs `transparency.enabled=false`; Slice 4 needed `--insecure-ignore-tlog=true --allow-insecure-registry`. If Flux exposes no equivalent, the verify mechanism is dead on arrival. | Slice 5c — gates whether cosign is viable at all | open — run live in 5b |
-| **P11b** | Does Chains sign a `flux push artifact` media type (`application/vnd.cncf.flux.content.v1.tar+gzip`) via a `manifests_ARTIFACT_OUTPUTS` typed result? Chains' signer graph is image-manifest shaped. | Slice 5c — the "no key in pipeline" path | open — run live in 5b |
-| **P11c** | If P11a+P11b pass: does Flux read the Chains `sigstore-bundle` referrer, or need the classic `sha256-<d>.sig` tag? | Slice 5c signature format | open — run live in 5b. Fail → `cosign attach` shim or a dedicated `cv-sign-sa` running `cosign sign`. |
+| **P11a** | Can Flux `OCIRepository.spec.verify` (`provider: cosign`, key mode) verify a **keyed, no-Rekor** signature against a **self-signed-TLS** registry at all? | Slice 5c — gates whether cosign is viable at all | **RESOLVED (2026-09-03) — PASS.** Flux CLI v2.9.4 / source-controller v1.9.4. An `OCIRepository` with `verify: {provider: cosign, secretRef: <signing-secrets/cosign.pub>}` + `certSecretRef: <zot-tls/ca.crt>`, pointed at a real Chains-signed pipeline image (`.../chainsaw-tender-sole@sha256:e7e789ad…`), reached `SourceVerified=True "verified signature of revision …"`. Keyed ECDSA P-256, **no Rekor** (Chains `transparency.enabled=false`), self-signed zot — all handled natively, **no `--insecure-ignore-tlog` shim, no `cosign attach`**. Negative control: wrong pubkey → `Ready=False [VerificationError] no matching signatures were found`. |
+| **P11b** | Does Chains sign a `flux push artifact` media type (`application/vnd.cncf.flux.content.v1.tar+gzip`) via a `manifests_ARTIFACT_OUTPUTS` typed result? Chains' signer graph is image-manifest shaped. | Slice 5c — the "no key in pipeline" path | open — run live in 5c (needs the real `flux push artifact` flow). P11a passing means the **verify** side is solid; P11b is only about whether Chains will sign a non-image OCI artifact. |
+| **P11c** | Does Flux read the Chains `sigstore-bundle` referrer, or need the classic `sha256-<d>.sig` tag? | Slice 5c signature format | **RESOLVED (2026-09-03) — PASS, folded into P11a.** The signed image carried only a `application/vnd.dev.sigstore.bundle.v0.3+json` referrer (no `.sig` tag); Flux verified it natively. No `cosign attach` shim, no `cv-sign-sa` fallback needed for verification. |
 | **P12** | Does the `OCIRepository` reach `SourceVerified` on its own once an async signature lands (interval retry absorbs the latency), no manual reconcile? | Slice 5c deploy flow | open — run live in 5b |
 | **P13** | Is `timoni build` of one `(module, values)` byte-deterministic across runs and across a Timoni version bump? Which labels/annotations (`managed-by`, version, config checksum) does it stamp? | Slice 5b generator + Slice 6 reconstruction | open — run in 5b |
 | **P6** | Chains + sigstore `hashivault://` against OpenBao — scheme? auth? | `cv_openbao` (separate repo) | provisionally resolved (docs): `hashivault://` should work against OpenBao; auth = OIDC/JWT via the Chains SA token. Live wire-up is `cv_openbao`'s first task. |

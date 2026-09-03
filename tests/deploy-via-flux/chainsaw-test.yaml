@@ -1,0 +1,247 @@
+# deploy-via-flux — the Slice 5c-A reconcile contract.
+#
+# Unlike the other suites this one runs against the tofu-PROVISIONED cluster:
+# it needs the Flux source + kustomize controllers and the prod
+# flux-system/cv-frontend OCIRepository + Kustomization (they are cluster-scoped,
+# not per-test). It drives a real cv-build PipelineRun into cv-pipeline and
+# asserts the GitOps half of deploy:
+#   - the deploy task published an OCI manifest artifact and Tekton Chains
+#     signed it async (sigstore-bundle referrer on the digest)
+#   - the OCIRepository verifies that cosign signature -> Ready/SourceVerified
+#   - the Kustomization applies the cv Deployment + Service into cv-pipeline at
+#     the built image @sha256, 1/1 ready
+#   - a manual `kubectl scale` on cv is reverted within one reconcile interval
+#   - a tampered artifact pushed at a higher CalVer tag is rejected
+#     (VerificationError) and the reconciled revision does not advance
+#
+# Precondition: `cd tofu && tofu apply`. The preflight step fails clean if Flux
+# is absent.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: deploy-via-flux
+spec:
+  concurrent: false
+  # Every step targets fixed namespaces (cv-pipeline / flux-system) explicitly;
+  # Chainsaw's ephemeral namespace is allocated but unused.
+  steps:
+    - name: preflight-flux-is-provisioned
+      try:
+        - script:
+            content: |
+              set -eu
+              for d in source-controller kustomize-controller; do
+                r=$(kubectl -n flux-system get deploy "$d" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+                [ "$r" = 1 ] || { echo "flux $d not ready — run 'cd tofu && tofu apply'" >&2; exit 1; }
+              done
+              kubectl -n flux-system get ocirepository cv-frontend >/dev/null \
+                || { echo "OCIRepository cv-frontend missing — tofu apply" >&2; exit 1; }
+              kubectl -n flux-system get kustomization cv-frontend >/dev/null \
+                || { echo "Kustomization cv-frontend missing — tofu apply" >&2; exit 1; }
+
+    - name: run-the-pipeline
+      try:
+        - script:
+            content: |
+              set -eu
+              cd "$(git rev-parse --show-toplevel)"
+              . ./digests.env
+              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              PIPELINE_REF="$(git rev-parse HEAD)"
+              kubectl apply -n cv-pipeline -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
+              kubectl -n cv-pipeline create -f - >/dev/null <<EOF
+              apiVersion: tekton.dev/v1
+              kind: PipelineRun
+              metadata:
+                generateName: deploy-via-flux-
+                labels: { cv-oci/acceptance-test: deploy-via-flux }
+              spec:
+                pipelineRef: { name: cv-build }
+                taskRunTemplate:
+                  serviceAccountName: cv-build-sa
+                  podTemplate:
+                    securityContext: { fsGroup: 1000 }
+                    nodeSelector: { kubernetes.io/arch: arm64 }
+                taskRunSpecs:
+                  - { pipelineTaskName: smoke, serviceAccountName: cv-smoke-sa }
+                  - { pipelineTaskName: smoke-teardown, serviceAccountName: cv-smoke-sa }
+                  - { pipelineTaskName: deploy, serviceAccountName: cv-deploy-sa }
+                params:
+                  - { name: builder-image, value: "docker.io/heroku/builder:24@${CNBBUILDER}" }
+                  - { name: run-image, value: "docker.io/heroku/heroku:24@${CNBRUNIMAGE}" }
+                  - { name: utility-image, value: "docker.io/library/bash@${CNBUTILITYIMAGE}" }
+                  - { name: kubectl-image, value: "docker.io/alpine/k8s:1.31.1@${CNBKUBECTLIMAGE}" }
+                  - { name: git-image, value: "docker.io/alpine/git@${CNBGITIMAGE}" }
+                  - { name: trivy-image, value: "ghcr.io/aquasecurity/trivy@${TRIVYCLI}" }
+                  - { name: oras-image, value: "ghcr.io/oras-project/oras@${ORASCLI}" }
+                  - { name: trivy-db, value: "${TRIVYDB}" }
+                  - { name: frontend-repo, value: "${FRONTEND_REPO}" }
+                  - { name: frontend-ref, value: "${FRONTEND_FIXTURE_SHA}" }
+                  - { name: app-repo, value: "${zot}/cv" }
+                  - { name: deploy-artifact-repo, value: "${zot}/cv-frontend" }
+                  - { name: namespace, value: "cv-pipeline" }
+                  - { name: pipeline-ref, value: "${PIPELINE_REF}" }
+                  - { name: render-image, value: "${zot}/timoni@${TIMONIIMAGE}" }
+                  - { name: flux-cli-image, value: "ghcr.io/fluxcd/flux-cli@${FLUXCLI}" }
+                workspaces:
+                  - name: shared
+                    volumeClaimTemplate:
+                      spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 3Gi } } }
+                timeouts: { pipeline: 25m }
+              EOF
+
+    - name: pipeline-succeeds-and-publishes-a-signed-artifact
+      try:
+        - script:
+            timeout: 25m
+            content: |
+              set -eu
+              sel='cv-oci/acceptance-test=deploy-via-flux'
+              deadline=$(( $(date +%s) + 1400 ))
+              while :; do
+                s=$(kubectl -n cv-pipeline get pipelinerun -l "$sel" \
+                  -o jsonpath='{.items[0].status.conditions[0].status}' 2>/dev/null || true)
+                [ "$s" = True ] && break
+                if [ "$s" = False ]; then
+                  kubectl -n cv-pipeline get pipelinerun -l "$sel" -o jsonpath='{.items[0].status.conditions[0].message}' >&2
+                  exit 1
+                fi
+                [ "$(date +%s)" -ge "$deadline" ] && { echo "pipeline timed out" >&2; exit 1; }
+                sleep 10
+              done
+              r() { kubectl -n cv-pipeline get taskrun -l "${sel},tekton.dev/pipelineTask=deploy" \
+                -o jsonpath="{.items[0].status.results[?(@.name=='$1')].value}"; }
+              url=$(r manifests_IMAGE_URL); dig=$(r manifests_IMAGE_DIGEST)
+              [ "$url" = "zot.cv-pipeline.svc.cluster.local:5000/cv-frontend" ] || { echo "url=$url" >&2; exit 1; }
+              printf '%s' "$dig" | grep -Eqx 'sha256:[0-9a-f]{64}'
+              # Chains signs async — bundle referrer lands within minutes.
+              for i in $(seq 1 30); do
+                oras discover --insecure --format tree "${url}@${dig}" 2>/dev/null | grep -q 'sigstore.bundle' && break
+                [ "$i" = 30 ] && { echo "no signature on ${url}@${dig}" >&2; exit 1; }
+                sleep 10
+              done
+
+    - name: ocirepository-verifies-and-kustomization-applies-cv
+      try:
+        - script:
+            timeout: 5m
+            content: |
+              set -eu
+              # OCIRepository picks up the new tag and verifies the cosign sig.
+              deadline=$(( $(date +%s) + 240 ))
+              while :; do
+                ok=$(kubectl -n flux-system get ocirepository cv-frontend \
+                  -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+                [ "$ok" = True ] && break
+                [ "$(date +%s)" -ge "$deadline" ] && {
+                  kubectl -n flux-system get ocirepository cv-frontend -o jsonpath='{.status.conditions}' >&2
+                  echo "OCIRepository not Ready" >&2; exit 1; }
+                sleep 10
+              done
+              kubectl -n flux-system get ocirepository cv-frontend \
+                -o jsonpath='{.status.conditions[?(@.type=="SourceVerified")].status}' | grep -qx True
+              # status.artifact.revision is "<tag>@<manifest sha256>" — it must
+              # carry the digest the deploy task published.
+              sel='cv-oci/acceptance-test=deploy-via-flux'
+              pushed=$(kubectl -n cv-pipeline get taskrun -l "${sel},tekton.dev/pipelineTask=deploy" \
+                -o jsonpath="{.items[0].status.results[?(@.name=='manifests_IMAGE_DIGEST')].value}")
+              rev=$(kubectl -n flux-system get ocirepository cv-frontend -o jsonpath='{.status.artifact.revision}')
+              case "$rev" in *"$pushed") : ;; *) echo "OCIRepository revision $rev != pushed $pushed" >&2; exit 1 ;; esac
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: kustomize.toolkit.fluxcd.io/v1
+              kind: Kustomization
+              metadata:
+                name: cv-frontend
+                namespace: flux-system
+              status:
+                (conditions[?type == 'Ready']):
+                  - status: 'True'
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: cv
+                namespace: cv-pipeline
+              spec:
+                template:
+                  spec:
+                    (contains(containers[0].image, '@sha256:')): true
+              status:
+                readyReplicas: 1
+        - script:
+            content: |
+              set -eu
+              sel='cv-oci/acceptance-test=deploy-via-flux'
+              built=$(kubectl -n cv-pipeline get pipelinerun -l "$sel" \
+                -o jsonpath='{.items[0].status.results[?(@.name=="app-image-digest")].value}')
+              img=$(kubectl -n cv-pipeline get deploy/cv -o jsonpath='{.spec.template.spec.containers[0].image}')
+              case "$img" in *"@${built}") : ;; *) echo "cv image $img != built $built" >&2; exit 1 ;; esac
+
+    - name: drift-is-reverted
+      try:
+        - script:
+            timeout: 6m
+            content: |
+              set -eu
+              kubectl -n cv-pipeline scale deploy/cv --replicas=3 >/dev/null
+              # kustomization_interval is 5m; reconcile sooner if we can.
+              kubectl -n flux-system annotate --overwrite kustomization/cv-frontend \
+                reconcile.fluxcd.io/requestedAt="$(date +%s)" >/dev/null 2>&1 || true
+              deadline=$(( $(date +%s) + 330 ))
+              while :; do
+                want=$(kubectl -n cv-pipeline get deploy/cv -o jsonpath='{.spec.replicas}')
+                [ "$want" = 1 ] && exit 0
+                [ "$(date +%s)" -ge "$deadline" ] && { echo "drift not reverted (replicas=$want)" >&2; exit 1; }
+                sleep 10
+              done
+
+    - name: tampered-artifact-is-rejected
+      try:
+        - script:
+            timeout: 6m
+            content: |
+              set -eu
+              zot="zot.cv-pipeline.svc.cluster.local:5000/cv-frontend"
+              # revision is "<tag>@<manifest sha256>"; take the digest half.
+              before=$(kubectl -n flux-system get ocirepository cv-frontend -o jsonpath='{.status.artifact.revision}')
+              before_dig=${before#*@}
+              # copy the current verified artifact, mutate it, push it at a
+              # strictly-higher CalVer tag so the semver resolver would pick it.
+              bad="0.99999999.0"
+              crane copy --insecure "${zot}@${before_dig}" "${zot}:__tamper_src" >/dev/null
+              crane mutate --insecure "${zot}:__tamper_src" --annotation cv-oci.test=tamper -t "${zot}:${bad}" >/dev/null
+              kubectl -n flux-system annotate --overwrite ocirepository/cv-frontend \
+                reconcile.fluxcd.io/requestedAt="$(date +%s)" >/dev/null 2>&1 || true
+              # within a couple of intervals the OCIRepository must go NotReady
+              # with a verification failure, and must NOT have adopted the bad digest.
+              deadline=$(( $(date +%s) + 240 ))
+              seen=0
+              while :; do
+                msg=$(kubectl -n flux-system get ocirepository cv-frontend \
+                  -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || true)
+                case "$msg" in *erif*|*signature*) seen=1; break ;; esac
+                [ "$(date +%s)" -ge "$deadline" ] && break
+                sleep 10
+              done
+              now=$(kubectl -n flux-system get ocirepository cv-frontend -o jsonpath='{.status.artifact.revision}')
+              # cleanup regardless of outcome
+              crane delete --insecure "${zot}:${bad}" >/dev/null 2>&1 || true
+              crane delete --insecure "${zot}:__tamper_src" >/dev/null 2>&1 || true
+              kubectl -n flux-system annotate --overwrite ocirepository/cv-frontend \
+                reconcile.fluxcd.io/requestedAt="$(date +%s)" >/dev/null 2>&1 || true
+              [ "$seen" = 1 ] || { echo "tampered artifact was NOT flagged as a verification failure" >&2; exit 1; }
+              [ "$now" = "$before" ] || { echo "reconciled revision advanced to a tampered artifact: $now" >&2; exit 1; }
+  catch:
+    - describe:
+        apiVersion: source.toolkit.fluxcd.io/v1
+        kind: OCIRepository
+    - describe:
+        apiVersion: kustomize.toolkit.fluxcd.io/v1
+        kind: Kustomization
+    - script:
+        content: |
+          tkn -n cv-pipeline pipelinerun logs -l cv-oci/acceptance-test=deploy-via-flux --all 2>/dev/null || true

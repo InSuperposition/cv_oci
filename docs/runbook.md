@@ -65,14 +65,18 @@ Gotchas found while wiring this:
 
 ## The pipeline
 
-### A `chainsaw test tests/` acceptance test fails
+### A chainsaw acceptance test fails
 
 The suite lives in `tests/` (Kyverno Chainsaw, not the forensics tool of the
 same name — see `docs/bootstrap-toolchain.md`). Each test runs the real
 `cv-build` Pipeline in its own ephemeral PSA-`restricted` namespace.
 
-- **Run one test:** `chainsaw test tests/pipeline-acceptance --config tests/.chainsaw.yaml`.
-- **Keep the namespace on failure:** `chainsaw test tests/... --skip-delete`.
+- **Always pass `--config tests/.chainsaw.yaml`.** It is not auto-discovered
+  (not even for `chainsaw test tests/`). Without it chainsaw uses defaults —
+  `ExecTimeout 5s` — and every pipeline-wait step dies with `signal: killed`
+  after ~5s. Full run: `chainsaw test --config tests/.chainsaw.yaml tests/`.
+- **Run one test:** `chainsaw test --config tests/.chainsaw.yaml tests/pipeline-acceptance/`.
+- **Keep the namespace on failure:** add `--skip-delete`.
   Then read the failing PipelineRun: `tkn -n <ns> pipelinerun logs -l
   cv-oci/acceptance-test=<test-name> --all`. Each test's `catch` block already
   dumps this on failure.
@@ -264,3 +268,74 @@ in `vendor/render/README.md`. Needs `crane` + reachable zot
 - **Fix:** the render step is a `script:` step (explicit `#!/bin/sh` — the image
   has a static busybox), so Tekton needs no entrypoint lookup. Do not switch it
   to `command:`/`args:` without giving the controller the zot CA.
+
+## Slice 5c-A
+
+### `tofu apply` — first run
+
+Prereqs: `bootstrap.sh` has run (zot + Chains + `signing-secrets` +
+`zot-tls`). Then:
+
+```sh
+cd tofu
+tofu init      # downloads alekc/kubectl + hashicorp/kubernetes
+tofu apply
+```
+
+`tofu apply` is idempotent — re-running on a provisioned cluster is a no-op.
+`tofu destroy` removes Flux + the CRs and leaves `bootstrap.sh`'s layer intact.
+
+### `deploy` step fails: `flux push artifact ... x509: certificate signed by unknown authority`
+
+- **Cause:** the `publish-artifact` step reaches zot over HTTPS with a
+  cert-manager self-signed CA. `flux push artifact` (v2.9.4) has no `--ca-file`
+  flag — it reads the CA from `SSL_CERT_FILE`.
+- **Fix:** the step mounts `zot-tls` `ca.crt` at `/tls/ca.crt` and sets
+  `SSL_CERT_FILE=/tls/ca.crt`. In an ephemeral test namespace `zot-tls` must be
+  copied in first (the Chainsaw `pipeline-acceptance` setup does this). Do NOT
+  use `--insecure-registry` — that is plain HTTP, zot is HTTPS.
+
+### `deploy` fails: `deploy needs a 40-hex cv_frontend sha`
+
+- **Cause:** `flux push artifact --revision` needs `cv-frontend@sha1:<40-hex>`.
+  The deploy step asserts `app-sha` is a full commit SHA. A branch name or short
+  SHA fails here.
+- **Fix:** pass `frontend-ref` as a full 40-char SHA (reconstruction pins it
+  anyway). The negative suites use branch names but never reach `deploy`.
+
+### OCIRepository stuck `Ready=False [VerificationError] no matching signatures`
+
+- **Expected transient** right after a deploy: Chains signs the artifact async
+  (~15s, minutes under load). The `OCIRepository` (`interval: 1m`) self-heals
+  once the `sigstore-bundle` referrer lands (P12).
+- **If it never clears:** check `kubectl -n tekton-chains logs deploy/tekton-chains-controller`
+  for the `deploy` TaskRun — Chains only signs when the TaskRun emitted
+  `manifests_IMAGE_URL` (bare repo, no `@`) + `manifests_IMAGE_DIGEST`
+  (`sha256:…`). An `_ARTIFACT_OUTPUTS` object is silently ignored ("No image
+  subject to attest").
+- **Wrong key:** `cosign-public-key` in `flux-system` must be the current
+  `tekton-chains/signing-secrets` `cosign.pub`. `tofu apply` re-copies it.
+
+### `tests/deploy-via-flux` — the reconcile suite
+
+Runs a real `cv-build` PipelineRun into `cv-pipeline` and drives the Flux
+reconcile (verify, apply, drift-revert, tamper-reject). Needs `tofu apply`
+first — its preflight step fails clean otherwise. Heavier than the other
+suites (~12min pipeline + Flux latency) and it mutates prod `cv-pipeline`
+state (leaves `cv` deployed). It also pushes an accumulating CalVer tag to
+`zot/cv-frontend` each run — folded into the existing zot-retention TODO.
+
+If it leaves the `OCIRepository` stuck at `VerificationError` after the
+tamper step (bad tag not cleaned):
+`crane delete --insecure zot.cv-pipeline.svc.cluster.local:5000/cv-frontend:0.99999999.0`
+then `kubectl -n flux-system annotate --overwrite ocirepository/cv-frontend
+reconcile.fluxcd.io/requestedAt="$(date +%s)"`.
+
+### Re-vendoring `tofu/flux/components.yaml` on a Flux bump
+
+`flux install --export --components=source-controller,kustomize-controller
+--namespace=flux-system --network-policy=true > tofu/flux/components.yaml`, then
+re-apply the three local edits documented in the file header (2 image pins from
+`digests.cue` + the `flux-system` Namespace `enforce=restricted` labels). Bump
+`digests.cue` `fluxSourceController` / `fluxKustomizeController` /
+`fluxCli` with `crane digest --platform linux/arm64` and regen.

@@ -5,8 +5,10 @@
 # Pipeline against the live cluster in its own ephemeral namespace, labelled to
 # match cv-pipeline's PodSecurity level so `restricted` is genuinely exercised.
 #
-#   chainsaw test tests/
-#   chainsaw test tests/ --test-dir tests/pipeline-acceptance   # one test
+# This config is NOT auto-discovered — pass it explicitly, or chainsaw falls
+# back to defaults (ExecTimeout 5s, which SIGKILLs every pipeline-wait step):
+#   chainsaw test --config tests/.chainsaw.yaml tests/
+#   chainsaw test --config tests/.chainsaw.yaml tests/pipeline-acceptance/   # one test
 #
 # Needs: kubectl, tkn, crane, jq, cosign, oras on PATH (docs/bootstrap-toolchain.md),
 # and a bootstrapped cluster (bootstrap/bootstrap.sh + the OrbStack node-trust

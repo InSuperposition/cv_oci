@@ -57,6 +57,7 @@ spec:
                   - { name: namespace, value: "${NS}" }
                   - { name: pipeline-ref, value: "${PIPELINE_REF}" }
                   - { name: render-image, value: "${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/timoni@${TIMONIIMAGE}" }
+                  - { name: flux-cli-image, value: "ghcr.io/fluxcd/flux-cli@${FLUXCLI}" }
                 workspaces:
                   - name: shared
                     volumeClaimTemplate:

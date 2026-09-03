@@ -41,7 +41,7 @@ else
 	# not K8s manifests — `chainsaw lint` validates those; see .githooks/pre-commit).
 	mapfile -t files < <(
 		git ls-files -- '*.yaml' '*.yml' \
-		| grep -Ev '^(schemas/|vendor/|scripts/test/fixtures/|tests/|params\.yaml$)' \
+		| grep -Ev '^(schemas/|vendor/|tofu/flux/|scripts/test/fixtures/|tests/|params\.yaml$)' \
 		| grep -Ev '(^|/)[a-z0-9-]+-patch\.yaml$' || true
 	)
 fi

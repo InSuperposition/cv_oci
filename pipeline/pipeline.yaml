@@ -31,6 +31,14 @@ spec:
     - { name: oras-image, type: string }
     - { name: frontend-repo, type: string }
     - { name: frontend-ref, type: string }
+    # This repo. `smoke`/`deploy` render their manifests from modules/web-app/
+    # (Slice 5b) — a step git-checks-out cv_oci@<pipeline-ref> for the module
+    # source. pipeline-ref is a branch or a full SHA (reconstruction pins the SHA).
+    - { name: pipeline-repo, type: string, default: "https://github.com/InSuperposition/cv_oci" }
+    - { name: pipeline-ref, type: string, default: "main" }
+    # The render image: scratch + the pinned timoni CLI (digests.cue timoniImage,
+    # digests.env TIMONIIMAGE). Full ref: zot/timoni@sha256:...
+    - { name: render-image, type: string }
     - { name: app-repo, type: string, default: "zot.cv-pipeline.svc.cluster.local:5000/cv" }
     - { name: insecure-registries, type: string, default: "zot.cv-pipeline.svc.cluster.local:5000" }
     - { name: namespace, type: string, default: cv-pipeline }
@@ -53,8 +61,10 @@ spec:
         - { name: sha, value: "$(params.frontend-ref)" }
         - { name: contract, value: "$(params.contract-paths)" }
         - { name: image, value: "$(params.git-image)" }
+        - { name: config-repo, value: "$(params.pipeline-repo)" }
+        - { name: config-ref, value: "$(params.pipeline-ref)" }
       taskSpec:
-        params: [{ name: repo }, { name: sha }, { name: contract }, { name: image }]
+        params: [{ name: repo }, { name: sha }, { name: contract }, { name: image }, { name: config-repo }, { name: config-ref }]
         workspaces: [{ name: source }]
         steps:
           - name: clone-and-assert
@@ -118,6 +128,40 @@ spec:
               # (Slice 2 reproducibility test / docs/designs/buildpacks-pivot.md).
               # The SHA is already captured above; nothing downstream needs .git.
               rm -rf .git
+
+          # Slice 5b: check out cv_oci itself for modules/web-app/. The `smoke`
+          # and `deploy` tasks `timoni build` the module from ./config/modules/.
+          # Only modules/ is kept; .git is stripped (same reproducibility reason
+          # as the app tree). config-ref is a branch or a full SHA.
+          - name: fetch-config
+            image: $(params.image)
+            workingDir: $(workspaces.source.path)
+            securityContext: *restricted-sc
+            script: |
+              #!/bin/sh
+              set -eu
+              rm -rf config && mkdir config && cd config
+              git init -q
+              git remote add origin "$(params.config-repo)"
+              n=0
+              while :; do
+                err="$(git fetch -q --depth 1 origin "$(params.config-ref)" 2>&1)" && break
+                case "$err" in
+                  *"Could not resolve host"*|*"Timeout"*|*"timed out"*|\
+                  *"unable to access"*|*"Connection refused"*|*"Connection reset"*)
+                    n=$((n + 1))
+                    [ "$n" -lt 5 ] || { echo "git fetch (config): transient failures x5: $err" >&2; exit 1; }
+                    echo "git fetch (config): retry $n in $((n * 5))s: $err" >&2
+                    sleep $((n * 5)) ;;
+                  *) echo "git fetch (config) failed (not transient): $err" >&2; exit 1 ;;
+                esac
+              done
+              git checkout -q FETCH_HEAD
+              got="$(git rev-parse HEAD)"
+              # keep only modules/ (the render input); drop everything else
+              find . -mindepth 1 -maxdepth 1 ! -name modules -exec rm -rf {} +
+              [ -f modules/web-app/timoni.cue ] || { echo "modules/web-app/ missing from config-ref $(params.config-ref)" >&2; exit 1; }
+              echo "config: modules/ from $(params.config-repo) @ $got"
 
     - name: build
       runAfter: [fetch]
@@ -260,57 +304,69 @@ spec:
               echo "referrers attached to $REF:"
               oras discover --insecure --format tree "$REF"
 
+    # Slice 5b: the ephemeral smoke app is rendered from modules/web-app/ (an
+    # instance named cv-smoke-<rid12>, selector {app: <name>}, plus the
+    # cv-oci/smoke=<rid> label the finally teardown selects on) — same module
+    # the real `deploy` uses, so smoke exercises the exact rendered shape.
     - name: smoke
       runAfter: [scan]
+      workspaces: [{ name: source, workspace: shared }]
       params:
         - { name: image-ref, value: "$(params.app-repo)@$(tasks.build.results.APP_IMAGE_DIGEST)" }
+        - { name: app-sha, value: "$(params.frontend-ref)" }
         - { name: namespace, value: "$(params.namespace)" }
         - { name: run-id, value: "$(context.pipelineRun.uid)" }
+        - { name: instance, value: "cv-smoke-$(context.pipelineRun.uid)" }
         - { name: image, value: "$(params.kubectl-image)" }
+        - { name: render-image, value: "$(params.render-image)" }
       taskSpec:
-        params: [{ name: image-ref }, { name: namespace }, { name: run-id }, { name: image }]
+        params: [{ name: image-ref }, { name: app-sha }, { name: namespace }, { name: run-id }, { name: instance }, { name: image }, { name: render-image }]
+        workspaces: [{ name: source }]
         steps:
+          - name: write-values
+            image: $(params.image)
+            securityContext: *restricted-sc  # Slice 1.7
+            script: |
+              #!/bin/sh
+              set -eu
+              WS="$(workspaces.source.path)"
+              mkdir -p "$WS/render/tmp"
+              cat > "$WS/render/smoke-values.cue" <<EOF
+              values: {
+                image:          "$(params.image-ref)"
+                appVersion:     "$(params.app-sha)"
+                selectorLabels: {app: "$(params.instance)"}
+                extraLabels:    {"cv-oci/smoke": "$(params.run-id)"}
+              }
+              EOF
+          - name: render
+            image: $(params.render-image)
+            securityContext: *restricted-sc  # Slice 1.7
+            # The render image is scratch + static timoni + static busybox
+            # (/bin/sh). An explicit shebang means Tekton needs no registry
+            # entrypoint lookup — the controller does not trust the self-signed
+            # zot cert. TIMONI_CACHING=false + TMPDIR: scratch has no writable
+            # $HOME or /tmp; a local-path build needs neither a cache nor much temp.
+            script: |
+              #!/bin/sh
+              set -eu
+              WS="$(workspaces.source.path)"
+              export TMPDIR="$WS/render/tmp" TIMONI_CACHING=false
+              /usr/local/bin/timoni build "$(params.instance)" \
+                "$WS/config/modules/web-app" -n "$(params.namespace)" \
+                -f "$WS/render/smoke-values.cue" > "$WS/render/smoke.yaml"
           - name: smoke
             image: $(params.image)
             securityContext: *restricted-sc  # Slice 1.7
             script: |
               #!/usr/bin/env bash
               set -euo pipefail
-              NS="$(params.namespace)"; RID="$(params.run-id)"; IMG="$(params.image-ref)"
-              NAME="cv-smoke-${RID:0:12}"; PORT=44100
+              WS="$(workspaces.source.path)"; NS="$(params.namespace)"
+              NAME="$(params.instance)"; RID="$(params.run-id)"
               cleanup(){ kubectl -n "$NS" delete deploy,svc -l "cv-oci/smoke=$RID" --ignore-not-found --wait=false >/dev/null 2>&1 || true; }
               trap cleanup EXIT
-              kubectl -n "$NS" apply -f - >/dev/null <<EOF
-              apiVersion: apps/v1
-              kind: Deployment
-              metadata: { name: $NAME, labels: { cv-oci/smoke: "$RID" } }
-              spec:
-                replicas: 1
-                selector: { matchLabels: { app: $NAME } }
-                template:
-                  metadata: { labels: { app: $NAME, cv-oci/smoke: "$RID" } }
-                  spec:
-                    automountServiceAccountToken: false
-                    containers:
-                      - name: app
-                        image: $IMG
-                        imagePullPolicy: IfNotPresent
-                        env: [{ name: PORT, value: "$PORT" }]
-                        ports: [{ containerPort: $PORT }]
-                        readinessProbe: { httpGet: { path: /healthz, port: $PORT }, periodSeconds: 3, failureThreshold: 20 }
-                        securityContext:
-                          runAsNonRoot: true
-                          runAsUser: 1000
-                          runAsGroup: 1000
-                          allowPrivilegeEscalation: false
-                          capabilities: { drop: ["ALL"] }
-                          seccompProfile: { type: RuntimeDefault }
-              ---
-              apiVersion: v1
-              kind: Service
-              metadata: { name: $NAME, labels: { cv-oci/smoke: "$RID" } }
-              spec: { selector: { app: $NAME }, ports: [{ port: 80, targetPort: $PORT }] }
-              EOF
+              test -s "$WS/render/smoke.yaml" || { echo "render produced no manifest" >&2; exit 1; }
+              kubectl -n "$NS" apply -f "$WS/render/smoke.yaml" >/dev/null
               kubectl -n "$NS" rollout status "deploy/$NAME" --timeout=180s
               url="http://${NAME}.${NS}.svc.cluster.local/healthz"
               for i in $(seq 1 10); do
@@ -321,8 +377,13 @@ spec:
               kubectl -n "$NS" logs "deploy/$NAME" --tail=30 || true
               echo "smoke: /healthz never 200" >&2; exit 1
 
+    # Slice 5b: the real `cv` Deployment + Service are rendered from
+    # modules/web-app/ (instance `cv`, appVersion = the cv_frontend SHA). Same
+    # module `smoke` rendered — the smoke pass proved this exact shape one step
+    # earlier. deploy-by-digest is unchanged: the image ref is the build result.
     - name: deploy
       runAfter: [smoke]
+      workspaces: [{ name: source, workspace: shared }]
       params:
         - { name: image-ref, value: "$(params.app-repo)@$(tasks.build.results.APP_IMAGE_DIGEST)" }
         - { name: image-digest, value: "$(tasks.build.results.APP_IMAGE_DIGEST)" }
@@ -330,50 +391,51 @@ spec:
         - { name: namespace, value: "$(params.namespace)" }
         - { name: pipelinerun, value: "$(context.pipelineRun.name)" }
         - { name: image, value: "$(params.kubectl-image)" }
+        - { name: render-image, value: "$(params.render-image)" }
       taskSpec:
-        params: [{ name: image-ref }, { name: image-digest }, { name: app-sha }, { name: namespace }, { name: pipelinerun }, { name: image }]
+        params: [{ name: image-ref }, { name: image-digest }, { name: app-sha }, { name: namespace }, { name: pipelinerun }, { name: image }, { name: render-image }]
+        workspaces: [{ name: source }]
         steps:
+          - name: write-values
+            image: $(params.image)
+            securityContext: *restricted-sc  # Slice 1.7
+            script: |
+              #!/bin/sh
+              set -eu
+              WS="$(workspaces.source.path)"; DIG="$(params.image-digest)"
+              printf '%s' "$DIG" | grep -Eqx 'sha256:[0-9a-f]{64}' || { echo "bad digest: $DIG" >&2; exit 1; }
+              mkdir -p "$WS/render/tmp"
+              cat > "$WS/render/deploy-values.cue" <<EOF
+              values: {
+                image:       "$(params.image-ref)"
+                appVersion:  "$(params.app-sha)"
+                extraLabels: {"app.kubernetes.io/part-of": "cv-oci"}
+              }
+              EOF
+          - name: render
+            image: $(params.render-image)
+            securityContext: *restricted-sc  # Slice 1.7
+            # scratch + static timoni + static busybox — see the `smoke` render step.
+            script: |
+              #!/bin/sh
+              set -eu
+              WS="$(workspaces.source.path)"
+              export TMPDIR="$WS/render/tmp" TIMONI_CACHING=false
+              /usr/local/bin/timoni build cv \
+                "$WS/config/modules/web-app" -n "$(params.namespace)" \
+                -f "$WS/render/deploy-values.cue" > "$WS/render/deploy.yaml"
           - name: deploy
             image: $(params.image)
             securityContext: *restricted-sc  # Slice 1.7
             script: |
               #!/usr/bin/env bash
               set -euo pipefail
-              NS="$(params.namespace)"; IMG="$(params.image-ref)"; DIG="$(params.image-digest)"
-              APP_SHA="$(params.app-sha)"; PR="$(params.pipelinerun)"; PORT=44100
-              printf '%s' "$DIG" | grep -Eqx 'sha256:[0-9a-f]{64}' || { echo "bad digest: $DIG" >&2; exit 1; }
+              WS="$(workspaces.source.path)"; NS="$(params.namespace)"
+              IMG="$(params.image-ref)"; DIG="$(params.image-digest)"
+              APP_SHA="$(params.app-sha)"; PR="$(params.pipelinerun)"
+              test -s "$WS/render/deploy.yaml" || { echo "render produced no manifest" >&2; exit 1; }
               prev="$(kubectl -n "$NS" get deploy/cv -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo none)"
-              kubectl -n "$NS" apply -f - >/dev/null <<EOF
-              apiVersion: apps/v1
-              kind: Deployment
-              metadata: { name: cv, labels: { app: cv, app.kubernetes.io/part-of: cv-oci } }
-              spec:
-                replicas: 1
-                selector: { matchLabels: { app: cv } }
-                template:
-                  metadata: { labels: { app: cv } }
-                  spec:
-                    automountServiceAccountToken: false
-                    containers:
-                      - name: app
-                        image: $IMG
-                        imagePullPolicy: IfNotPresent
-                        env: [{ name: PORT, value: "$PORT" }]
-                        ports: [{ containerPort: $PORT }]
-                        readinessProbe: { httpGet: { path: /healthz, port: $PORT }, periodSeconds: 3, failureThreshold: 20 }
-                        securityContext:
-                          runAsNonRoot: true
-                          runAsUser: 1000
-                          runAsGroup: 1000
-                          allowPrivilegeEscalation: false
-                          capabilities: { drop: ["ALL"] }
-                          seccompProfile: { type: RuntimeDefault }
-              ---
-              apiVersion: v1
-              kind: Service
-              metadata: { name: cv, labels: { app: cv } }
-              spec: { selector: { app: cv }, ports: [{ port: 80, targetPort: $PORT }] }
-              EOF
+              kubectl -n "$NS" apply -f "$WS/render/deploy.yaml" >/dev/null
               kubectl -n "$NS" rollout status deploy/cv --timeout=180s
               url="http://cv.${NS}.svc.cluster.local/healthz"
               code=000

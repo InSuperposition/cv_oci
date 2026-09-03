@@ -21,7 +21,7 @@ params:
     default: "sha256:c4d59cab4aa6d6cfb8e3c31b571f5af5086004f3fe28700b844a14660bf0c9c4"
   - name: timoniImage-digest
     type: string
-    default: "sha256:1d8af7e07438b9a13e8e566ba5b1829f7127832096f0c86252f600d5eb2eb873"
+    default: "sha256:072a282e80fc5a25b80846f64d15ebe6a5037f5d81682fcbce4af8b8e52b7a48"
   - name: trivyCli-digest
     type: string
     default: "sha256:55ad20f8a239a3e95427e60b8aaea38788550c18a3f1772976bebf732e6ae166"

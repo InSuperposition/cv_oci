@@ -24,6 +24,7 @@ spec:
               set -eu
               cd "$(git rev-parse --show-toplevel)"
               . ./digests.env
+              PIPELINE_REF="$(git rev-parse HEAD)"   # 5b: clone-config pulls modules/ from this SHA (must be pushed)
               kubectl apply -n "$NS" -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
               kubectl -n "$NS" create -f - >/dev/null <<EOF
               apiVersion: tekton.dev/v1
@@ -55,6 +56,8 @@ spec:
                   - { name: frontend-ref, value: "0bbc68418ce92048a85b8b18afe1dcfe6204bb83" }
                   - { name: app-repo, value: "${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/${NS}" }
                   - { name: namespace, value: "${NS}" }
+                  - { name: pipeline-ref, value: "${PIPELINE_REF}" }
+                  - { name: render-image, value: "${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/timoni@${TIMONIIMAGE}" }
                 workspaces:
                   - name: shared
                     volumeClaimTemplate:

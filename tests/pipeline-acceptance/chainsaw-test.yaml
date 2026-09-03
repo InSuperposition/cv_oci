@@ -33,6 +33,7 @@ spec:
               set -eu
               cd "$(git rev-parse --show-toplevel)"
               . ./digests.env
+              PIPELINE_REF="$(git rev-parse HEAD)"   # 5b: clone-config pulls modules/ from this SHA (must be pushed)
               APP_REPO="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/${NS}"
               kubectl apply -n "$NS" -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
               kubectl -n "$NS" create -f - >/dev/null <<EOF
@@ -65,6 +66,8 @@ spec:
                   - { name: frontend-ref, value: "${FRONTEND_FIXTURE_SHA}" }
                   - { name: app-repo, value: "${APP_REPO}" }
                   - { name: namespace, value: "${NS}" }
+                  - { name: pipeline-ref, value: "${PIPELINE_REF}" }
+                  - { name: render-image, value: "${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/timoni@${TIMONIIMAGE}" }
                 workspaces:
                   - name: shared
                     volumeClaimTemplate:

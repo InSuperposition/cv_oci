@@ -69,5 +69,5 @@ images: {
 	// cv_oci builds one from the checksum-verified binary — see
 	// `vendor/render/README.md`. Lives in the in-cluster registry only
 	// (`zot/timoni`), so this is a bare digest, not a repo@digest ref.
-	timoniImage: "sha256:1d8af7e07438b9a13e8e566ba5b1829f7127832096f0c86252f600d5eb2eb873"
+	timoniImage: "sha256:072a282e80fc5a25b80846f64d15ebe6a5037f5d81682fcbce4af8b8e52b7a48"
 }

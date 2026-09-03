@@ -27,6 +27,7 @@ spec:
               cd "$(git rev-parse --show-toplevel)"
               . ./digests.env
               zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
+              PIPELINE_REF="$(git rev-parse HEAD)"   # 5b: clone-config pulls modules/ from this SHA (must be pushed)
               NS2="${NS1}-b"
               kubectl create ns "$NS2" >/dev/null
               kubectl label ns "$NS2" \
@@ -78,6 +79,8 @@ spec:
                   - { name: frontend-ref, value: "${FRONTEND_FIXTURE_SHA}" }
                   - { name: app-repo, value: "${zot}/${ns}" }
                   - { name: namespace, value: "${ns}" }
+                  - { name: pipeline-ref, value: "${PIPELINE_REF}" }
+                  - { name: render-image, value: "${zot}/timoni@${TIMONIIMAGE}" }
                 workspaces:
                   - name: shared
                     volumeClaimTemplate:

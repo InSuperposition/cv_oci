@@ -32,6 +32,24 @@ spec:
     # starves the node. One test at a time.
     parallel: 1
     failFast: false
+  error:
+    # Shared diagnostics for the ephemeral-namespace pipeline suites
+    # (pipeline-acceptance, build-is-reproducible, pipeline-rejects-*). These
+    # collectors resolve against the test's ephemeral namespace, so a suite that
+    # targets a fixed namespace (deploy-via-flux -> cv-pipeline/flux-system,
+    # zot-tag-retention -> cv-pipeline) keeps its own namespace-scoped catch:
+    # block. Combined config-then-test-then-step on any step failure.
+    catch:
+      - events: {}
+      - describe:
+          apiVersion: tekton.dev/v1
+          kind: PipelineRun
+      - describe:
+          apiVersion: tekton.dev/v1
+          kind: TaskRun
+      - podLogs:
+          selector: tekton.dev/pipeline=cv-build
+          tail: 60
   cleanup:
     # Namespace teardown is slow and not worth blocking on; the next run uses a
     # fresh ephemeral namespace regardless.

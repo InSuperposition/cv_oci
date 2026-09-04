@@ -72,7 +72,14 @@ fi
 
 if command -v bats >/dev/null 2>&1; then
 	step "bats"
-	bats scripts/test/ || fail=1
+	mapfile -t bats_dirs < <(
+		for d in scripts/test tests; do
+			[ -n "$(git ls-files -- "$d/**/*.bats" "$d/*.bats")" ] && echo "$d"
+		done
+	)
+	if [ "${#bats_dirs[@]}" -gt 0 ]; then
+		bats -r "${bats_dirs[@]}" || fail=1
+	fi
 else
 	echo "  bats not installed — skipping tests"
 fi

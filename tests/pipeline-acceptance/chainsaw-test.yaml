@@ -13,6 +13,12 @@
 #     manifests_IMAGE_DIGEST (sha256); the artifact exists in zot and Chains
 #     signs it (sigstore-bundle referrer). The Flux reconcile of that artifact
 #     is a separate suite (deploy-via-flux) — it needs the provisioned cluster.
+#
+# No shell in this file: the PipelineRun comes from the shared
+# ../_resources/create-pipelinerun.sh, the wait from
+# ../_resources/wait-for-pipelinerun.sh, and every data-gathering step runs one
+# named script from this directory. Failure diagnostics come from the config's
+# spec.error.catch (this suite runs in an ephemeral namespace).
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -26,163 +32,62 @@ spec:
         # in-script rewrite of manifests/rbac.yaml (`s/cv-pipeline/$NS/` piped to apply).
         - apply:
             file: ../_resources/pipeline-rbac.yaml
-        - script:
+        - apply:
+            file: ../../tasks/buildpacks.yaml
+        - apply:
+            file: ../../pipeline/pipeline.yaml
+        # 5c: the deploy task's `flux push artifact` step mounts ca.crt from
+        # zot-tls (SSL_CERT_FILE) — copy that one key into the ephemeral namespace.
+        - command:
+            entrypoint: ../_resources/copy-zot-ca-to-namespace.sh
             env:
               - name: NS
                 value: ($namespace)
-            content: |
-              set -eu
-              cd "$(git rev-parse --show-toplevel)"
-              . ./digests.env
-              PIPELINE_REF="$(git rev-parse HEAD)"   # 5b: clone-config pulls modules/ from this SHA (must be pushed)
-              APP_REPO="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/${NS}"
-              # 5c: the deploy task's `flux push artifact` step mounts ca.crt
-              # from zot-tls (SSL_CERT_FILE) — copy that one key into the
-              # ephemeral namespace.
-              kubectl create secret generic zot-tls -n "$NS" \
-                --from-literal=ca.crt="$(kubectl get secret zot-tls -n cv-pipeline -o jsonpath='{.data.ca\.crt}' | base64 -d)" \
-                --dry-run=client -o yaml | kubectl apply -n "$NS" -f - >/dev/null
-              kubectl apply -n "$NS" -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
-              kubectl -n "$NS" create -f - >/dev/null <<EOF
-              apiVersion: tekton.dev/v1
-              kind: PipelineRun
-              metadata:
-                generateName: acceptance-
-                labels: { cv-oci/acceptance-test: pipeline-acceptance }
-              spec:
-                pipelineRef: { name: cv-build }
-                taskRunTemplate:
-                  serviceAccountName: cv-build-sa
-                  podTemplate:
-                    securityContext: { fsGroup: 1000 }
-                    nodeSelector: { kubernetes.io/arch: arm64 }
-                taskRunSpecs:
-                  - { pipelineTaskName: smoke, serviceAccountName: cv-smoke-sa }
-                  - { pipelineTaskName: smoke-teardown, serviceAccountName: cv-smoke-sa }
-                  - { pipelineTaskName: deploy, serviceAccountName: cv-deploy-sa }
-                params:
-                  - { name: builder-image, value: "docker.io/heroku/builder:24@${CNBBUILDER}" }
-                  - { name: run-image, value: "docker.io/heroku/heroku:24@${CNBRUNIMAGE}" }
-                  - { name: utility-image, value: "docker.io/library/bash@${CNBUTILITYIMAGE}" }
-                  - { name: kubectl-image, value: "docker.io/alpine/k8s:1.31.1@${CNBKUBECTLIMAGE}" }
-                  - { name: git-image, value: "docker.io/alpine/git@${CNBGITIMAGE}" }
-                  - { name: trivy-image, value: "ghcr.io/aquasecurity/trivy@${TRIVYCLI}" }
-                  - { name: oras-image, value: "ghcr.io/oras-project/oras@${ORASCLI}" }
-                  - { name: trivy-db, value: "${TRIVYDB}" }
-                  - { name: frontend-repo, value: "${FRONTEND_REPO}" }
-                  - { name: frontend-ref, value: "${FRONTEND_FIXTURE_SHA}" }
-                  - { name: app-repo, value: "${APP_REPO}" }
-                  - { name: deploy-artifact-repo, value: "${APP_REPO}-frontend" }
-                  - { name: namespace, value: "${NS}" }
-                  - { name: pipeline-ref, value: "${PIPELINE_REF}" }
-                  - { name: render-image, value: "${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/timoni@${TIMONIIMAGE}" }
-                  - { name: flux-cli-image, value: "ghcr.io/fluxcd/flux-cli@${FLUXCLI}" }
-                workspaces:
-                  - name: shared
-                    volumeClaimTemplate:
-                      spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 3Gi } } }
-                timeouts: { pipeline: 25m }
-              EOF
+        - command:
+            entrypoint: ../_resources/create-pipelinerun.sh
+            env:
+              - name: NS
+                value: ($namespace)
+              - name: ACCEPTANCE_LABEL
+                value: pipeline-acceptance
 
     - name: pipeline-succeeds
       try:
-        # Poll rather than `assert` on Succeeded=True: a failed PipelineRun goes
-        # Succeeded=False and we want to fail fast with its message, not wait out
-        # the assert timeout.
-        - script:
-            timeout: 25m
+        - command:
+            entrypoint: ../_resources/wait-for-pipelinerun.sh
             env:
+              - name: NAME
+                value: run
               - name: NS
                 value: ($namespace)
-            content: |
-              set -eu
-              deadline=$(( $(date +%s) + 1400 ))
-              sel='cv-oci/acceptance-test=pipeline-acceptance'
-              while :; do
-                s=$(kubectl -n "$NS" get pipelinerun -l "$sel" \
-                  -o jsonpath='{.items[0].status.conditions[0].status}' 2>/dev/null || true)
-                [ "$s" = "True" ] && exit 0
-                if [ "$s" = "False" ]; then
-                  kubectl -n "$NS" get pipelinerun -l "$sel" \
-                    -o jsonpath='{.items[0].status.conditions[0].message}' >&2
-                  exit 1
-                fi
-                [ "$(date +%s)" -ge "$deadline" ] && { echo "pipeline timed out" >&2; exit 1; }
-                sleep 10
-              done
 
     - name: manifest-artifact-published-and-signed
       try:
-        - script:
+        - command:
+            entrypoint: ./verify-manifest-artifact.sh
             timeout: 6m
             env:
               - name: NS
                 value: ($namespace)
-            content: |
-              set -eu
-              cd "$(git rev-parse --show-toplevel)"
-              . ./digests.env
-              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-              pr() { kubectl -n "$NS" get pipelinerun -l cv-oci/acceptance-test=pipeline-acceptance \
-                -o jsonpath="{.items[0].status.results[?(@.name==\"$1\")].value}"; }
-
-              # deploy emitted the Chains-signable pair (P11b): bare URL + sha256.
-              url=$(pr manifest-artifact-url)
-              adigest=$(pr manifest-artifact-digest)
-              version=$(pr manifest-artifact-version)
-              [ "$url" = "${zot}/${NS}-frontend" ] || { echo "artifact url: $url" >&2; exit 1; }
-              printf '%s' "$adigest" | grep -Eqx 'sha256:[0-9a-f]{64}'
-              printf '%s' "$version" | grep -Eqx '0\.[0-9]+\.[0-9]+'
-
-              # the artifact is really in zot, tagged with the CalVer version.
-              crane digest --insecure "${url}:${version}" >/dev/null
-              [ "$(crane digest --insecure "${url}:${version}")" = "$adigest" ] \
-                || { echo "tag $version does not point at $adigest" >&2; exit 1; }
-
-              # Chains signs the artifact async — a sigstore-bundle referrer lands
-              # on its digest within a few minutes.
-              ref="${url}@${adigest}"
-              for i in $(seq 1 30); do
-                oras discover --insecure --format tree "$ref" 2>/dev/null \
-                  | grep -q 'sigstore.bundle' && break
-                [ "$i" = 30 ] && { echo "no signature referrer on $ref" >&2; oras discover --insecure --format tree "$ref" >&2; exit 1; }
-                sleep 10
-              done
-
-              # and it verifies against the Chains public key.
-              pub=$(mktemp)
-              cosign public-key --key k8s://tekton-chains/signing-secrets > "$pub"
-              cosign verify --key "$pub" --insecure-ignore-tlog=true --allow-insecure-registry "$ref" >/dev/null
 
     - name: cve-gate-and-sbom
       try:
-        - script:
+        - command:
+            entrypoint: ./read-cve-and-sbom-results.sh
             env:
               - name: NS
                 value: ($namespace)
-            content: |
-              set -eu
-              cd "$(git rev-parse --show-toplevel)"
-              . ./digests.env
-              prr() { kubectl -n "$NS" get pipelinerun -l cv-oci/acceptance-test=pipeline-acceptance \
-                -o jsonpath="{.items[0].status.results[?(@.name==\"$1\")].value}"; }
-              [ "$(prr cve-verdict)" = "pass" ]
-              [ "$(prr cve-db-digest)" = "${TRIVYDB}" ]
-              [ "$(prr sbom-components)" -ge 20 ]
 
     - name: no-smoke-leak
       try:
         # /healthz on the built image is proved by the `smoke` task inside the
         # pipeline (one step before deploy). Here: the ephemeral smoke instance
         # was torn down and left nothing behind.
-        - script:
+        - command:
+            entrypoint: ../_resources/count-smoke-leftovers.sh
             env:
               - name: NS
                 value: ($namespace)
-            content: |
-              set -eu
-              leftover=$(kubectl -n "$NS" get deploy,svc -l cv-oci/smoke -o name | wc -l | tr -d ' ')
-              [ "$leftover" = "0" ]
 
     - name: chains-signed
       try:
@@ -194,67 +99,25 @@ spec:
               metadata:
                 labels:
                   tekton.dev/pipelineTask: build
+                  tekton.dev/pipelineRun: run
                 annotations:
                   chains.tekton.dev/signed: "true"
 
     - name: signature-attestation-referrers
       try:
-        - script:
+        - command:
+            entrypoint: ./verify-signature-and-referrers.sh
             env:
               - name: NS
                 value: ($namespace)
-            content: |
-              set -eu
-              cd "$(git rev-parse --show-toplevel)"
-              . ./digests.env
-              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-              digest=$(kubectl -n "$NS" get pipelinerun -l cv-oci/acceptance-test=pipeline-acceptance \
-                -o jsonpath='{.items[0].status.results[?(@.name=="app-image-digest")].value}')
-              ref="${zot}/${NS}@${digest}"
-              pub=$(mktemp)
-              cosign public-key --key k8s://tekton-chains/signing-secrets > "$pub"
-              cosign verify --key "$pub" --insecure-ignore-tlog=true --allow-insecure-registry "$ref" >/dev/null
-              cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true --allow-insecure-registry \
-                --type slsaprovenance1 "$ref" >/dev/null
-              pred=$(cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true --allow-insecure-registry \
-                --type slsaprovenance1 "$ref" 2>/dev/null | jq -r '.payload' | base64 -d)
-              printf '%s' "$pred" | jq -e \
-                ".predicate.buildDefinition.resolvedDependencies[]|select(.digest.sha256==\"${CNBBUILDER#sha256:}\")" >/dev/null
-              refs=$(oras discover --insecure --format tree "$ref")
-              printf '%s\n' "$refs" | grep -q 'sigstore.bundle'
-              printf '%s\n' "$refs" | grep -q 'application/vnd.cyclonedx+json'
-              printf '%s\n' "$refs" | grep -q 'cv-oci.cve-verdict'
 
     - name: tampered-copy-fails-verify
       try:
-        - script:
+        - command:
+            entrypoint: ./push-tampered-image.sh
             env:
               - name: NS
                 value: ($namespace)
             check:
               # the final cosign verify MUST fail -> non-zero exit -> $error set
               ($error != null): true
-            content: |
-              set -eu
-              cd "$(git rev-parse --show-toplevel)"
-              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-              repo="${zot}/${NS}"
-              digest=$(kubectl -n "$NS" get pipelinerun -l cv-oci/acceptance-test=pipeline-acceptance \
-                -o jsonpath='{.items[0].status.results[?(@.name=="app-image-digest")].value}')
-              tampered="${repo}:tampered"
-              crane copy --insecure "${repo}@${digest}" "$tampered" >/dev/null
-              crane mutate --insecure "$tampered" --annotation cv-oci.test=tamper -t "$tampered" >/dev/null
-              tdig=$(crane digest --insecure "$tampered")
-              pub=$(mktemp)
-              cosign public-key --key k8s://tekton-chains/signing-secrets > "$pub"
-              cosign verify --key "$pub" --insecure-ignore-tlog=true --allow-insecure-registry "${repo}@${tdig}"
-  catch:
-    - describe:
-        apiVersion: tekton.dev/v1
-        kind: PipelineRun
-    - script:
-        env:
-          - name: NS
-            value: ($namespace)
-        content: |
-          tkn -n "$NS" pipelinerun logs -l cv-oci/acceptance-test=pipeline-acceptance --all 2>/dev/null || true

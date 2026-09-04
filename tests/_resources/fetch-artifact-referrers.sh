@@ -9,6 +9,7 @@
 # the poll must be inside the script.
 #
 #   DEADLINE_SECONDS   how long to wait for the signature (default: 300)
+#   POLL_INTERVAL_SECONDS  time between polls (default: 10; a bats case sets 0)
 #
 # Prints {"referrer_types":[..],"signed":bool}. Never fails on "not signed yet"
 # past the deadline — it reports signed:false and the assert tree decides.
@@ -17,6 +18,7 @@ set -euo pipefail
 # chainsaw templates `env` values, not `args` — call sites pass REF as env.
 ref=${REF:-${1:?set REF (or pass <ref> as $1)}}
 deadline=$(( $(date +%s) + ${DEADLINE_SECONDS:-300} ))
+poll_interval=${POLL_INTERVAL_SECONDS:-10}
 
 types='[]'
 signed=false
@@ -28,7 +30,7 @@ while :; do
 		break
 	fi
 	[ "$(date +%s)" -ge "$deadline" ] && break
-	sleep 10
+	sleep "$poll_interval"
 done
 
 jq -nc --argjson types "$types" --argjson signed "$signed" \

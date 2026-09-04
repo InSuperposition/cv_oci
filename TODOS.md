@@ -5,20 +5,6 @@ triggers) — this is new work not yet scheduled into a slice.
 
 ## P2
 
-### Test-double harness for `tests/_resources/` wrapper scripts
-- **What:** a `bin`-stub PATH shim (fake `kubectl`/`oras`/`cosign`/`crane`
-  recording argv) so thin tool-wrapper scripts — `verify-image-signature.sh`,
-  `fetch-artifact-referrers.sh`, `copy-zot-ca-to-namespace.sh` — can assert
-  their command construction without a cluster.
-- **Why:** the shell-extraction pass (below, shipped) gave every *pure*
-  script (`create-pipelinerun.sh`) a `DRY_RUN`-mode bats case, but a thin
-  wrapper that just shells out to one tool has no such seam — it's covered
-  only by the suite's own live run.
-- **Context:** raised in the eng review for `chore-extract-inline-test-shell`
-  (2026-09-04, codex outside-voice finding #10). Defense in depth: the green
-  suite run already catches real breakage; this would catch a wrong flag or
-  arg order before a live run does.
-- **Effort:** S–M.
 - **Depends on:** nothing.
 
 ### Registry auth (`cv_openbao` arc)

@@ -10,6 +10,7 @@
 #   NAME / $1          PipelineRun name  (chainsaw templates `env` values, not
 #   NS   / $2          namespace          `args` — call sites pass these as env)
 #   DEADLINE_SECONDS   overall wait budget (default: 1400)
+#   POLL_INTERVAL_SECONDS  time between polls (default: 10; a bats case sets 0)
 #
 # Exit 0 on success. Exit 1 on Succeeded=False (prints the message to stderr) or
 # on the deadline.
@@ -18,6 +19,7 @@ set -euo pipefail
 name=${NAME:-${1:?set NAME (or pass name as $1)}}
 ns=${NS:-${2:?set NS (or pass namespace as $2)}}
 deadline=$(( $(date +%s) + ${DEADLINE_SECONDS:-1400} ))
+poll_interval=${POLL_INTERVAL_SECONDS:-10}
 
 while :; do
 	status=$(kubectl -n "$ns" get pipelinerun "$name" \
@@ -38,5 +40,5 @@ while :; do
 		echo "pipelinerun ${ns}/${name} did not finish within the deadline (status=${status:-<none>})" >&2
 		exit 1
 	fi
-	sleep 10
+	sleep "$poll_interval"
 done

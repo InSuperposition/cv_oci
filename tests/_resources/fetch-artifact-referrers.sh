@@ -14,7 +14,8 @@
 # past the deadline — it reports signed:false and the assert tree decides.
 set -euo pipefail
 
-ref=${1:?usage: fetch-artifact-referrers.sh <ref>}
+# chainsaw templates `env` values, not `args` — call sites pass REF as env.
+ref=${REF:-${1:?set REF (or pass <ref> as $1)}}
 deadline=$(( $(date +%s) + ${DEADLINE_SECONDS:-300} ))
 
 types='[]'

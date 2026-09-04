@@ -64,11 +64,34 @@ spec:
     - name: manifest-artifact-published-and-signed
       try:
         - command:
-            entrypoint: ./verify-manifest-artifact.sh
-            timeout: 6m
+            entrypoint: ./read-manifest-artifact.sh
             env:
               - name: NS
                 value: ($namespace)
+            outputs:
+              - name: m
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              ($m.url): ($m.expected_url)
+              (starts_with($m.digest, 'sha256:')): true
+              (length($m.digest)): 71
+              (starts_with($m.version, '0.')): true
+              ($m.tag_digest): ($m.digest)
+        - command:
+            # Chains signs the artifact async — poll (in the script) for the
+            # sigstore-bundle referrer on its digest.
+            entrypoint: ../_resources/fetch-artifact-referrers.sh
+            timeout: 6m
+            env:
+              - name: REF
+                value: (join('@', [$m.url, $m.digest]))
+            outputs:
+              - name: sig
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              ($sig.signed): true
 
     - name: cve-gate-and-sbom
       try:
@@ -77,6 +100,14 @@ spec:
             env:
               - name: NS
                 value: ($namespace)
+            outputs:
+              - name: c
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              ($c.cve_verdict): pass
+              ($c.cve_db_digest): ($c.pinned_db)
+              ($c.sbom_components >= `20`): true
 
     - name: no-smoke-leak
       try:
@@ -106,10 +137,21 @@ spec:
     - name: signature-attestation-referrers
       try:
         - command:
-            entrypoint: ./verify-signature-and-referrers.sh
+            entrypoint: ./read-provenance-and-referrers.sh
             env:
               - name: NS
                 value: ($namespace)
+            outputs:
+              - name: x
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              ($x.verify_rc): 0
+              ($x.attest_rc): 0
+              (length($x.resolved_digests[?@ == $x.expected_builder]) > `0`): true
+              (length($x.referrer_types[?contains(@, 'sigstore.bundle')]) > `0`): true
+              (length($x.referrer_types[?contains(@, 'cyclonedx')]) > `0`): true
+              (length($x.referrer_types[?contains(@, 'cve-verdict')]) > `0`): true
 
     - name: tampered-copy-fails-verify
       try:

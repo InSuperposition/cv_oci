@@ -11,7 +11,8 @@
 #   {"verify_rc":N,"attest_rc":N,"resolved_digests":["sha256:..",..]}
 set -euo pipefail
 
-ref=${1:?usage: verify-image-signature.sh <ref>}
+# chainsaw templates `env` values, not `args` — call sites pass REF as env.
+ref=${REF:-${1:?set REF (or pass <ref> as $1)}}
 
 pub=$(mktemp)
 trap 'rm -f "$pub"' EXIT

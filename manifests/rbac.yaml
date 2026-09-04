@@ -7,8 +7,15 @@
 #
 #   fetch, build        -> cv-build-sa    no K8s API calls at all; no token
 #   smoke, smoke-teardown -> cv-smoke-sa  ephemeral Deployment/Service churn
-#   deploy              -> cv-deploy-sa   the real `cv` Deployment/Service +
-#                                         the cv-deploy-state ConfigMap
+#   deploy              -> cv-deploy-sa   no K8s API calls at all; no token
+#                                         (retired 2026-09-04 — deploy renders
+#                                         + `flux push artifact`s to zot, an OCI
+#                                         registry push, never touches the K8s
+#                                         API; Flux applies the rendered
+#                                         manifest instead. See "tighten or
+#                                         retire cv-deploy-role",
+#                                         docs/designs/buildpacks-pivot.md
+#                                         5c-A outside-voice finding 12.)
 #
 # What is deliberately NOT granted anywhere: secrets, the buildpacks task's
 # `dockerconfig` workspace (the zot seed is unauthenticated — no Secret to
@@ -16,12 +23,12 @@
 # `prepare` root step is a PodSecurity concern tracked in docs/debt.md, not an
 # RBAC one.
 #
-# Slice 5a — cv-smoke-role and cv-deploy-role are ClusterRoles (they were
-# byte-identical in every namespace). The rules live here once; the namespaced
-# ServiceAccounts + RoleBindings below are for the real cv-pipeline namespace,
-# and the acceptance tests re-create the same 5 namespaced objects in their
-# ephemeral namespace from tests/_resources/pipeline-rbac.yaml (a Chainsaw
-# ($namespace)-templated copy — no `sed`). The two files share these ClusterRoles.
+# Slice 5a — cv-smoke-role is a ClusterRole (it was byte-identical in every
+# namespace). The rule lives here once; the namespaced ServiceAccounts +
+# RoleBinding below are for the real cv-pipeline namespace, and the acceptance
+# tests re-create the same 4 namespaced objects in their ephemeral namespace
+# from tests/_resources/pipeline-rbac.yaml (a Chainsaw ($namespace)-templated
+# copy — no `sed`). The two files share this ClusterRole.
 
 # --- smoke (+ finally teardown): ephemeral run-scoped app --------------------
 apiVersion: rbac.authorization.k8s.io/v1
@@ -39,27 +46,6 @@ rules:
   # `kubectl logs deploy/<smoke>` on failure
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
-    verbs: ["get", "list", "watch"]
----
-# --- deploy: the real `cv` Deployment/Service + deploy-state pointer ---------
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: cv-deploy-role
-rules:
-  - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
-  # cv-deploy-state: current/previous digest + app-sha + PipelineRun pointer
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
-  # `kubectl get ep cv` on a failed rollout
-  - apiGroups: [""]
-    resources: ["endpoints", "pods", "pods/log"]
     verbs: ["get", "list", "watch"]
 ---
 # --- fetch + build: no cluster access ---------------------------------------
@@ -97,17 +83,7 @@ kind: ServiceAccount
 metadata:
   name: cv-deploy-sa
   namespace: cv-pipeline
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: cv-deploy-rolebinding
-  namespace: cv-pipeline
-subjects:
-  - kind: ServiceAccount
-    name: cv-deploy-sa
-    namespace: cv-pipeline
-roleRef:
-  kind: ClusterRole
-  name: cv-deploy-role
-  apiGroup: rbac.authorization.k8s.io
+# render (timoni build, writes a file) + `flux push artifact` (an OCI registry
+# push) never touch the Kubernetes API. No RoleBinding, and no mounted token —
+# same shape as cv-build-sa above.
+automountServiceAccountToken: false

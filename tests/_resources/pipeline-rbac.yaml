@@ -2,15 +2,17 @@
 # test namespace.
 #
 # This is a Chainsaw ($namespace)-templated copy of the namespaced objects in
-# manifests/rbac.yaml (the 3 ServiceAccounts + 2 RoleBindings). It replaces the
+# manifests/rbac.yaml (the 3 ServiceAccounts + 1 RoleBinding). It replaces the
 # retired in-script namespace rewrite of manifests/rbac.yaml (a stream-editor
 # substitution piped to kubectl apply) — Chainsaw substitutes ($namespace) at
 # apply time, no shell.
 #
-# The cv-smoke-role / cv-deploy-role ClusterRoles are NOT here — they are
-# cluster-scoped singletons applied once by bootstrap.sh from manifests/rbac.yaml
-# and shared by every namespace. Keep this file's SA names, RoleBinding names,
-# and roleRef targets in lockstep with manifests/rbac.yaml.
+# The cv-smoke-role ClusterRole is NOT here — it is a cluster-scoped singleton
+# applied once by bootstrap.sh from manifests/rbac.yaml and shared by every
+# namespace. cv-deploy-sa needs no ClusterRole (retired 2026-09-04 — deploy
+# never touches the K8s API, see manifests/rbac.yaml). Keep this file's SA
+# names, RoleBinding names, and roleRef targets in lockstep with
+# manifests/rbac.yaml.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -29,6 +31,7 @@ kind: ServiceAccount
 metadata:
   name: cv-deploy-sa
   namespace: ($namespace)
+automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -42,18 +45,4 @@ subjects:
 roleRef:
   kind: ClusterRole
   name: cv-smoke-role
-  apiGroup: rbac.authorization.k8s.io
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: cv-deploy-rolebinding
-  namespace: ($namespace)
-subjects:
-  - kind: ServiceAccount
-    name: cv-deploy-sa
-    namespace: ($namespace)
-roleRef:
-  kind: ClusterRole
-  name: cv-deploy-role
   apiGroup: rbac.authorization.k8s.io

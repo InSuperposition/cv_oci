@@ -815,9 +815,11 @@ documents the transient as expected.
   `digests.cue` + `docs/bootstrap-toolchain.md`.
 - **5c-A: deploy needs no new k8s RBAC.** `flux push artifact` is registry-only
   (no cluster API), so the decoupled deploy task touches no Flux/Deployment
-  resources — `cv-deploy-role` is now over-provisioned (it kept Deployment
-  write from the pre-Flux `kubectl apply` path); tighten or retire it in a
-  follow-up. Anonymous zot push still works (auth is 5c-B).
+  resources — `cv-deploy-role` was over-provisioned (it kept Deployment write
+  from the pre-Flux `kubectl apply` path). **Retired 2026-09-04:**
+  `cv-deploy-role` + `cv-deploy-rolebinding` deleted; `cv-deploy-sa` now
+  matches `cv-build-sa`'s zero-permission shape (`automountServiceAccountToken:
+  false`, no RoleBinding). Anonymous zot push still works (auth is 5c-B).
 - Flux `kustomize-controller` gets a cluster-wide reconciler binding from the
   vendored `components.yaml` (`cluster-admin`-class) — enough to create
   Deployment/Service in `cv-pipeline`. Both controllers are already

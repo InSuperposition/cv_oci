@@ -4,9 +4,9 @@
 # rewriting manifests/rbac.yaml's namespace with a stream editor, piped to
 # kubectl apply.
 # This asserts the replacement — a Chainsaw ($namespace)-templated apply of
-# tests/_resources/pipeline-rbac.yaml — lands the 5 namespaced RBAC objects
-# correctly, with the RoleBinding subjects pointed at THIS namespace's SAs and
-# the ClusterRoles (applied once by bootstrap) resolvable.
+# tests/_resources/pipeline-rbac.yaml — lands the 4 namespaced RBAC objects
+# correctly, with the RoleBinding subject pointed at THIS namespace's SA and
+# the ClusterRole (applied once by bootstrap) resolvable.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -19,7 +19,7 @@ spec:
         - apply:
             file: ../_resources/pipeline-rbac.yaml
 
-    - name: the-five-namespaced-objects-exist-here
+    - name: the-four-namespaced-objects-exist-here
       try:
         - assert:
             resource:
@@ -43,8 +43,9 @@ spec:
               metadata:
                 name: cv-deploy-sa
                 namespace: ($namespace)
+              automountServiceAccountToken: false
 
-    - name: rolebindings-target-this-namespaces-serviceaccounts
+    - name: the-smoke-rolebinding-targets-this-namespaces-serviceaccount
       try:
         - assert:
             resource:
@@ -58,21 +59,19 @@ spec:
                 name: cv-smoke-role
               (subjects[0].namespace == $namespace): true
               (subjects[0].name == 'cv-smoke-sa'): true
-        - assert:
+        # negative — cv-deploy-sa gets no RoleBinding (retired 2026-09-04):
+        # deploy never touches the K8s API, same shape as cv-build-sa.
+        - error:
             resource:
               apiVersion: rbac.authorization.k8s.io/v1
               kind: RoleBinding
               metadata:
                 name: cv-deploy-rolebinding
                 namespace: ($namespace)
-              roleRef:
-                kind: ClusterRole
-                name: cv-deploy-role
-              (subjects[0].namespace == $namespace): true
-              (subjects[0].name == 'cv-deploy-sa'): true
 
-    # Functional proof that cv-deploy-sa / cv-smoke-sa can act in this namespace
-    # comes free from pipeline-acceptance: its deploy + smoke tasks run as those
-    # SAs and would fail on any RBAC gap. cv-build-sa is bound to nothing (it
-    # makes no API calls); its automountServiceAccountToken:false above is the
-    # tell. This suite only proves the templated apply produces the right objects.
+    # Functional proof that cv-smoke-sa can act in this namespace comes free
+    # from pipeline-acceptance: its smoke task runs as that SA and would fail
+    # on any RBAC gap. cv-build-sa and cv-deploy-sa are bound to nothing (they
+    # make no API calls); their automountServiceAccountToken:false above is
+    # the tell. This suite only proves the templated apply produces the right
+    # objects.

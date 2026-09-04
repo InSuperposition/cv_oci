@@ -21,17 +21,6 @@ triggers) — this is new work not yet scheduled into a slice.
 - **Effort:** S–M.
 - **Depends on:** nothing.
 
-### Tighten or retire `cv-deploy-role`
-- **What:** the `deploy` task no longer `kubectl apply`s (5c-A — Flux
-  reconciles). `cv-deploy-role` still grants Deployment/Service write from the
-  pre-Flux path. Either drop it to nothing (the task uses no cluster API) or
-  fold `cv-deploy-sa` into `cv-build-sa`.
-- **Why:** minimal viable surface area — an unused write grant is negative
-  space with a cost.
-- **Context:** Slice 5c-A. Left in place this pass to keep the diff scoped;
-  the `deploy` TaskRun still runs as `cv-deploy-sa`.
-- **Effort:** S. **Depends on:** 5c-A shipped + `deploy-via-flux` green.
-
 ### Registry auth (`cv_openbao` arc)
 - **What:** zot `accessControl` htpasswd (anonymous pull denied) +
   `dockerconfigjson` pull Secrets wired into every consumer (pipeline

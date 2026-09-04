@@ -97,11 +97,28 @@ same name — see `docs/bootstrap-toolchain.md`). Each test runs the real
 
 ### A PipelineRun is stuck / a stale `cv` Deployment is running
 
-- **Rollback:** `kubectl -n cv-pipeline rollout undo deploy/cv`, or
-  `kubectl -n cv-pipeline set image deploy/cv app=$(kubectl -n cv-pipeline get
-  cm cv-deploy-state -o jsonpath='{.data.previous}')`. `cv-deploy-state.data`
-  records `current_image`, `current_digest`, and `previous` (a `<zot>@sha256`
-  ref); `kubectl rollout history deploy/cv` is the fuller trail.
+- **Rollback (since 5c-A, Flux owns the Deployment — `kubectl rollout undo` /
+  `cv-deploy-state` are dead, `deploy` no longer touches the K8s API at all):**
+  - **Forward-fix (preferred):** re-run the pipeline against a corrected
+    `cv_frontend` ref. It publishes a new, higher-CalVer, freshly-signed
+    artifact; Flux's `OCIRepository.spec.verify` + `spec.ref.semver` pick it up
+    on the next reconcile (`kustomization_interval`, ~5m in `tofu/variables.tf`).
+  - **Stopgap pin to an old artifact:** `cv-frontend` carries no retention
+    policy (`tests/zot-tag-retention/`), so every past CalVer tag is still in
+    zot. `spec.ref.semver` takes precedence over `spec.ref.tag` (vendored CRD,
+    `tofu/flux/components.yaml`) — setting `tag` alone does **nothing** while
+    `semver` is still set. Null it out explicitly:
+    ```
+    kubectl -n flux-system patch ocirepository/cv-frontend --type merge \
+      -p '{"spec":{"ref":{"semver":null,"tag":"<old-calver>"}}}'
+    ```
+    This is a manual, out-of-band edit — `tofu apply` re-declares
+    `spec.ref.semver` unconditionally (`tofu/flux-source.tf`) and will silently
+    revert the pin on the next apply. Restore it explicitly once the forward-fix
+    lands: `kubectl -n flux-system patch ocirepository/cv-frontend --type
+    merge -p '{"spec":{"ref":{"tag":null,"semver":"<original range>"}}}'`.
+  - `kubectl -n flux-system describe ocirepository/kustomization cv-frontend`
+    is the fuller trail (conditions + events), not `kubectl rollout history`.
 
 ### `cue vet digests.cue` fails with a constraint error
 
@@ -194,7 +211,29 @@ gives the same answer, independent of when you run it.
   kubectl apply -f manifests/rbac.yaml                       # recreates them -> ClusterRole
   kubectl -n cv-pipeline delete role cv-smoke-role cv-deploy-role   # old namespaced Roles
   ```
-  A fresh `bootstrap.sh` run on an empty cluster has no conflict.
+  A fresh `bootstrap.sh` run on an empty cluster has no conflict. **Historical**
+  — `cv-deploy-role`/`cv-deploy-rolebinding` no longer exist in
+  `manifests/rbac.yaml` (retired 2026-09-04, next entry); this note is now
+  `cv-smoke-role` only.
+
+### `cv-deploy-role` / `cv-deploy-rolebinding` still on an already-bootstrapped cluster
+
+- **Symptom:** `kubectl get clusterrole cv-deploy-role` / `kubectl -n
+  cv-pipeline get rolebinding cv-deploy-rolebinding` still return an object,
+  even though both were deleted from `manifests/rbac.yaml` (2026-09-04, `deploy`
+  never touches the K8s API — see the file's own header comment).
+- **Cause:** `bootstrap.sh` phase 3 is a plain `kubectl apply -f
+  manifests/rbac.yaml`, no `--prune`. Deleting a resource from the file does
+  not delete it from a cluster that already has it.
+- **Fix (one-time, per already-bootstrapped cluster):**
+  ```
+  kubectl -n cv-pipeline delete rolebinding cv-deploy-rolebinding --ignore-not-found
+  kubectl delete clusterrole cv-deploy-role --ignore-not-found
+  # confirm cv-deploy-sa genuinely needs nothing:
+  kubectl auth can-i create deployments -n cv-pipeline \
+    --as=system:serviceaccount:cv-pipeline:cv-deploy-sa   # expect "no"
+  ```
+  A fresh `bootstrap.sh` run on an empty cluster never creates these objects.
 
 ### `fetch` fails: `Could not resolve host: github.com (Timeout while contacting DNS servers)`
 
@@ -228,10 +267,11 @@ gives the same answer, independent of when you run it.
 ### A pipeline acceptance test fails at the first TaskRun with `serviceaccount ... not found`
 
 - **Likely cause:** the Chainsaw `apply` of `tests/_resources/pipeline-rbac.yaml`
-  did not run, or the shared ClusterRoles (`cv-smoke-role` / `cv-deploy-role`)
-  are not on the cluster (they come from `manifests/rbac.yaml` via
-  `bootstrap.sh` phase 3, not from the test).
-- **Check:** `kubectl get clusterrole cv-smoke-role cv-deploy-role`;
+  did not run, or the shared `cv-smoke-role` ClusterRole is not on the cluster
+  (it comes from `manifests/rbac.yaml` via `bootstrap.sh` phase 3, not from the
+  test). `cv-deploy-sa` needs no ClusterRole — it is bound to nothing, same
+  shape as `cv-build-sa`.
+- **Check:** `kubectl get clusterrole cv-smoke-role`;
   `kubectl -n <test-ns> get sa,rolebinding`.
 - **Fix:** re-run `bootstrap.sh` phase 3, or `kubectl apply -f manifests/rbac.yaml`.
 

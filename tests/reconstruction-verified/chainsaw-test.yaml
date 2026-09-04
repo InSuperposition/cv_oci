@@ -3,40 +3,32 @@
 # Runs against the live cluster's deployed `cv` (the digest-pinned image the
 # Flux Kustomization rolled out into cv-pipeline) — not a fresh build.
 #
-# Every comparison is a kyverno-json assertion tree in an `assert:` block,
-# evaluated by Chainsaw's embedded engine. A `script:` only gathers data — a
-# fetch / derive, then one `jq` that shapes a JSON payload bound via `outputs`.
-# No `jq -e`, no `diff`, no loops or `[ … ]` doing the checking. Each negative
-# is a second `assert:` in the same step that mutates the fetched value inside
-# the tree (`$x[1:]`, `replace_all(…)`) — no extra fetch.
+# Structure: preflight is pure Chainsaw resource assertions. Every other step
+# runs ONE named script from this directory (data-gathering only — a fetch /
+# derive that prints one JSON object) and carries every comparison in an
+# `assert:` block — a kyverno-json assertion tree evaluated by Chainsaw's
+# embedded engine. No shell in this file; no `jq -e` / `diff` / `[ … ]` in the
+# scripts. Each negative is a second `assert:` in the same step that mutates the
+# fetched value inside the tree (`$x[1:]`, `replace_all(…)`) — no extra fetch.
 #
 # (kyverno-json is the assertion-tree language; the standalone `kyverno-json`
 # CLI is unmaintained and `kyverno json scan` was removed in kyverno v1.19 —
 # the engine lives on inside Chainsaw, which the repo already pins.)
 #
-# Layers:
-#   provenance — `cosign verify-attestation` checks the Chains SLSA signature;
-#     the assert tree checks the decoded predicate (subject digest, buildType,
-#     resolvedDependencies carries the pinned CNB builder + run-image from
-#     digests.env, externalParameters names the cv_frontend fixture SHA).
-#   cross-checks — the published artifacts are internally consistent with the
-#     deployed image and the pinned inputs: the CycloneDX SBOM referrer's
-#     component set (name/version/purl, normalised — raw bytes carry a per-run
-#     serialNumber + bom-ref UUIDs); the CVE-verdict referrer's verdict vs a
-#     fresh scan at the pinned vuln-DB; the cv-frontend manifest artifact vs a
-#     fresh `timoni build`. Each with a negative.
-#   vsa — on all of the above passing, a signed SLSA VSA is emitted as an OCI
-#     referrer on the deployed digest (self-issued with the Chains key on this
-#     single-actor cluster), and must verify + coexist with the Chains
-#     provenance / SBOM / verdict referrers.
-#
-# Host tools: kubectl, cosign, oras, jq, trivy, timoni, git, tar (all pinned,
-# docs/bootstrap-toolchain.md). Registry access is --insecure (self-signed zot
-# CA), same as the rest of the suite.
+# Scripts (shellcheck'd via .githooks/pre-commit, bats-able):
+#   lib.sh                          shared fetch helpers
+#   fetch-provenance-predicate.sh   cosign verify-attestation (sig) + decoded statement
+#   prime-pinned-trivy-db.sh        one pinned vuln-DB download into the run cache
+#   derive-sbom-component-sets.sh   fresh trivy CycloneDX set + every deployed referrer's
+#   derive-cve-verdict.sh           fresh scan at the pinned DB + the deployed verdict
+#   render-and-fetch-manifest.sh    fresh `timoni build` + the reconciled artifact
+#   emit-and-fetch-vsa.sh           `cosign attest` the VSA + fetch it back + referrer counts
+#   verify-vsa-with-foreign-key.sh  `cosign verify-attestation` under a throwaway key
+#   dump-referrers.sh               on-failure diagnostic
 #
 # Precondition: a deployed, digest-pinned `cv` Deployment in cv-pipeline with
 # its Chains + SBOM + CVE-verdict referrers, and the flux-system/cv-frontend
-# OCIRepository (i.e. the deploy-via-flux path has run). Preflight fails clean.
+# OCIRepository (i.e. the deploy-via-flux path has run).
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -50,61 +42,34 @@ spec:
     assert: 60s
     exec: 20m
   steps:
-    - name: preflight-deployed-cv-has-referrers
+    - name: preflight-deployed-cv-and-ocirepository
       try:
-        - script:
-            content: |
-              set -eu
-              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-              img=$(kubectl -n cv-pipeline get deploy cv \
-                -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
-              oci=$(kubectl -n flux-system get ocirepository cv-frontend -o name 2>/dev/null || true)
-              refs='{}'
-              case "$img" in
-                *"/cv@sha256:"*) refs=$(oras discover --insecure --format json "${zot}/cv@${img##*@}" 2>/dev/null || echo '{}') ;;
-              esac
-              printf '%s' "$refs" | jq -c --arg img "$img" --arg oci "$oci" '{
-                image: $img,
-                ocirepository: $oci,
-                provenance: ([.manifests[]? | select(.artifactType == "application/vnd.dev.sigstore.bundle.v0.3+json")] | length),
-                sbom:       ([.manifests[]? | select(.artifactType == "application/vnd.cyclonedx+json")] | length),
-                verdict:    ([.manifests[]? | select(.artifactType == "application/vnd.cv-oci.cve-verdict.v1+json")] | length)
-              }'
-            outputs:
-              - name: pf
-                value: (json_parse($stdout))
         - assert:
             resource:
-              (starts_with($pf.image, 'zot.cv-pipeline.svc.cluster.local:5000/cv@sha256:')): true
-              ($pf.ocirepository): ocirepository.source.toolkit.fluxcd.io/cv-frontend
-              ($pf.provenance > `0`): true
-              ($pf.sbom > `0`): true
-              ($pf.verdict > `0`): true
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: cv
+                namespace: cv-pipeline
+              spec:
+                template:
+                  spec:
+                    containers:
+                      - (starts_with(image, 'zot.cv-pipeline.svc.cluster.local:5000/cv@sha256:')): true
+        - assert:
+            resource:
+              apiVersion: source.toolkit.fluxcd.io/v1
+              kind: OCIRepository
+              metadata:
+                name: cv-frontend
+                namespace: flux-system
+              status:
+                (conditions[?type == 'Ready'].status | [0]): "True"
 
     - name: provenance-content-matches-pinned-inputs
       try:
-        - script:
-            content: |
-              set -eu
-              cd "$(git rev-parse --show-toplevel)"
-              . ./digests.env
-              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-              img=$(kubectl -n cv-pipeline get deploy cv \
-                -o jsonpath='{.spec.template.spec.containers[0].image}')
-              digest="${img##*@}"
-              ref="${zot}/cv@${digest}"
-              pub=$(mktemp)
-              cosign public-key --key k8s://tekton-chains/signing-secrets > "$pub"
-              # signature — non-zero here fails the step before the assert runs
-              cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true \
-                --allow-insecure-registry --type slsaprovenance1 "$ref" >/dev/null
-              # all attestations of this type are byte-identical genuine provenance; take one
-              cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true \
-                --allow-insecure-registry --type slsaprovenance1 "$ref" 2>/dev/null \
-                | head -1 | jq -r '.payload' | base64 -d \
-                | jq -c --arg d "${digest#sha256:}" --arg b "${CNBBUILDER#sha256:}" \
-                        --arg r "${CNBRUNIMAGE#sha256:}" --arg fx "$FRONTEND_FIXTURE_SHA" \
-                    '{statement: ., expect: {digest: $d, builder: $b, runimg: $r, fixture: $fx}}'
+        - command:
+            entrypoint: ./fetch-provenance-predicate.sh
             outputs:
               - name: p
                 value: (json_parse($stdout))
@@ -119,67 +84,20 @@ spec:
               (length($p.statement.predicate.buildDefinition.resolvedDependencies[?digest.sha256 == $builder]) > `0`): true
               (length($p.statement.predicate.buildDefinition.resolvedDependencies[?digest.sha256 == $runimg]) > `0`): true
               (contains($p.statement.predicate.buildDefinition.externalParameters.runSpec.params[?name == 'APP_IMAGE'].value | [0], $p.expect.fixture)): true
-
-    - name: provenance-does-not-carry-an-unpinned-digest
-      try:
-        - script:
-            content: |
-              set -eu
-              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-              img=$(kubectl -n cv-pipeline get deploy cv \
-                -o jsonpath='{.spec.template.spec.containers[0].image}')
-              ref="${zot}/cv@${img##*@}"
-              pub=$(mktemp)
-              cosign public-key --key k8s://tekton-chains/signing-secrets > "$pub"
-              cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true \
-                --allow-insecure-registry --type slsaprovenance1 "$ref" 2>/dev/null \
-                | head -1 | jq -r '.payload' | base64 -d | jq -c '{statement: .}'
-            outputs:
-              - name: p
-                value: (json_parse($stdout))
         - assert:
+            # negative — a digest that never built this image must be absent
             resource:
-              # a digest that never built this image must be absent
               (length($p.statement.predicate.buildDefinition.resolvedDependencies[?digest.sha256 == '0000000000000000000000000000000000000000000000000000000000000000'])): 0
 
     - name: prime-the-pinned-trivy-db
       try:
-        - script:
-            # one download of the digest-pinned vuln-DB into a run-fixed cache;
-            # the CVE + SBOM steps below read it with --skip-db-update so the
-            # verdict depends only on (image digest, DB digest)
-            content: |
-              set -eu
-              cd "$(git rev-parse --show-toplevel)"; . ./digests.env
-              trivy image --quiet --cache-dir /tmp/cv-recon-trivydb --download-db-only \
-                --db-repository "ghcr.io/aquasecurity/trivy-db@${TRIVYDB}"
+        - command:
+            entrypoint: ./prime-pinned-trivy-db.sh
 
     - name: xcheck-sbom-component-set-matches-deployed
       try:
-        - script:
-            content: |
-              set -eu
-              cd "$(git rev-parse --show-toplevel)"
-              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-              img=$(kubectl -n cv-pipeline get deploy cv \
-                -o jsonpath='{.spec.template.spec.containers[0].image}')
-              ref="${zot}/cv@${img##*@}"
-              repo="${ref%@*}"
-              fresh=$(mktemp)
-              trivy image --quiet --cache-dir /tmp/cv-recon-trivydb --skip-db-update \
-                --format cyclonedx --insecure "$ref" > "$fresh"
-              # fetch every deployed CycloneDX referrer blob (data-gathering)
-              blobs=$(mktemp)
-              oras discover --insecure --format json "$ref" \
-                | jq -r '.manifests[] | select(.artifactType == "application/vnd.cyclonedx+json") | .digest' \
-                | while read -r m; do
-                    bl=$(oras manifest fetch --insecure "${repo}@${m}" | jq -r '.layers[0].digest')
-                    oras blob fetch --insecure --output - "${repo}@${bl}"
-                  done > "$blobs"
-              # emit fresh + every deployed set, all normalised and sorted the same way
-              jq -sc --slurpfile f "$fresh" \
-                '{fresh: ([$f[0].components[] | {name, version, purl}] | sort_by(.purl, .name, .version)),
-                  deployed: [.[] | [.components[] | {name, version, purl}] | sort_by(.purl, .name, .version)]}' "$blobs"
+        - command:
+            entrypoint: ./derive-sbom-component-sets.sh
             outputs:
               - name: x
                 value: (json_parse($stdout))
@@ -192,77 +110,33 @@ spec:
               (length($x.deployed) > `0`): true
               (length($x.deployed[?@ != $fresh])): 0
         - assert:
-            # negative — the same set with one component removed no longer
-            # matches, so the cross-check would catch a missing component
+            # negative — the same set with one component removed no longer matches
             resource:
               ($fresh != $fresh[1:]): true
 
     - name: xcheck-cve-verdict-consistent-with-a-fresh-scan
       try:
-        - script:
-            content: |
-              set -eu
-              cd "$(git rev-parse --show-toplevel)"
-              . ./digests.env
-              grep -qF -- 'POLICY="--severity CRITICAL --ignore-unfixed --exit-code 1"' pipeline/pipeline.yaml
-              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-              img=$(kubectl -n cv-pipeline get deploy cv \
-                -o jsonpath='{.spec.template.spec.containers[0].image}')
-              ref="${zot}/cv@${img##*@}"
-              repo="${ref%@*}"
-              v=$(oras discover --insecure --format json "$ref" \
-                | jq -r '[.manifests[] | select(.artifactType == "application/vnd.cv-oci.cve-verdict.v1+json")][0].digest')
-              vbl=$(oras manifest fetch --insecure "${repo}@${v}" | jq -r '.layers[0].digest')
-              vjson=$(oras blob fetch --insecure --output - "${repo}@${vbl}")
-              run_image=$(printf '%s' "$vjson" | jq -r '.run_image')
-              app=$(mktemp); run=$(mktemp)
-              trivy image --quiet --cache-dir /tmp/cv-recon-trivydb --skip-db-update \
-                --severity CRITICAL --ignore-unfixed --format json --insecure "$ref" > "$app"
-              trivy image --quiet --cache-dir /tmp/cv-recon-trivydb --skip-db-update \
-                --severity CRITICAL --ignore-unfixed --format json "$run_image" > "$run"
-              jq -nc --argjson v "$vjson" --slurpfile a "$app" --slurpfile r "$run" '{
-                deployed_verdict: $v.cve_verdict,
-                app_fixable_criticals: ([$a[0].Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length),
-                run_fixable_criticals: ([$r[0].Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length)
-              }'
+        - command:
+            entrypoint: ./derive-cve-verdict.sh
             outputs:
               - name: c
                 value: (json_parse($stdout))
         - assert:
             resource:
-              # the deployed verdict is 'pass' and a fresh scan at the pinned DB
+              # deployed verdict is 'pass' and a fresh scan at the pinned DB
               # agrees: zero fixable CRITICALs in the app image and the run image
               ($c.deployed_verdict): pass
               ($c.app_fixable_criticals): 0
               ($c.run_fixable_criticals): 0
         - assert:
-            # negative — the fresh scan is clean, so a referrer claiming
-            # 'fail-critical' contradicts the re-derived counts
+            # negative — a clean fresh scan contradicts a 'fail-critical' claim
             resource:
               ($c.app_fixable_criticals == `0` && $c.run_fixable_criticals == `0` && 'fail-critical' == 'pass'): false
 
     - name: xcheck-manifest-matches-deployed-artifact
       try:
-        - script:
-            content: |
-              set -eu
-              cd "$(git rev-parse --show-toplevel)"
-              . ./digests.env
-              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-              img=$(kubectl -n cv-pipeline get deploy cv \
-                -o jsonpath='{.spec.template.spec.containers[0].image}')
-              digest="${img##*@}"
-              vals="$(mktemp -d)/values.cue"
-              printf 'values: {\n  image:       "%s/cv@%s"\n  appVersion:  "%s"\n  extraLabels: {"app.kubernetes.io/part-of": "cv-oci"}\n}\n' \
-                "$zot" "$digest" "$FRONTEND_FIXTURE_SHA" > "$vals"
-              fresh=$(mktemp)
-              timoni build cv ./modules/web-app -n cv-pipeline -f "$vals" > "$fresh"
-              rev=$(kubectl -n flux-system get ocirepository cv-frontend \
-                -o jsonpath='{.status.artifact.revision}')
-              lyr=$(oras manifest fetch --insecure "${zot}/cv-frontend:${rev%@*}" | jq -r '.layers[0].digest')
-              deployed=$(mktemp)
-              oras blob fetch --insecure --output - "${zot}/cv-frontend@${lyr}" | tar -xzO > "$deployed"
-              jq -nc --rawfile a "$fresh" --rawfile b "$deployed" '{fresh: $a, deployed: $b}'
+        - command:
+            entrypoint: ./render-and-fetch-manifest.sh
             outputs:
               - name: m
                 value: (json_parse($stdout))
@@ -276,46 +150,8 @@ spec:
 
     - name: vsa-emitted-and-coexists-with-the-chains-referrers
       try:
-        - script:
-            content: |
-              set -eu
-              cd "$(git rev-parse --show-toplevel)"
-              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-              img=$(kubectl -n cv-pipeline get deploy cv \
-                -o jsonpath='{.spec.template.spec.containers[0].image}')
-              digest="${img##*@}"
-              ref="${zot}/cv@${digest}"
-              vsa_type="https://slsa.dev/verification_summary/v1"
-              pred=$(mktemp)
-              jq --arg u "oci://${ref}" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                '.resourceUri = $u | .timeVerified = $t' \
-                tests/reconstruction-verified/vsa-predicate.json > "$pred"
-              # self-issued with the Chains key. cosign 3.x needs BOTH flags to
-              # skip the public Rekor log; a k8s:// key honours neither, so pull
-              # the key to a file. No --replace -> appended alongside the others.
-              kd=$(mktemp -d)
-              kubectl -n tekton-chains get secret signing-secrets \
-                -o jsonpath='{.data.cosign\.key}' | base64 -d > "$kd/cosign.key"
-              COSIGN_PASSWORD="$(kubectl -n tekton-chains get secret signing-secrets \
-                -o jsonpath='{.data.cosign\.password}' | base64 -d)"
-              export COSIGN_PASSWORD
-              cosign attest --key "$kd/cosign.key" --type "$vsa_type" --predicate "$pred" \
-                --allow-insecure-registry --tlog-upload=false --use-signing-config=false "$ref" >/dev/null
-              pub=$(mktemp)
-              cosign public-key --key k8s://tekton-chains/signing-secrets > "$pub"
-              vsa=$(cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true \
-                --allow-insecure-registry --type "$vsa_type" "$ref" 2>/dev/null \
-                | head -1 | jq -r '.payload' | base64 -d)
-              # a Chains SLSA provenance still verifies too
-              cosign verify-attestation --key "$pub" --insecure-ignore-tlog=true \
-                --allow-insecure-registry --type slsaprovenance1 "$ref" >/dev/null
-              refs=$(oras discover --insecure --format json "$ref")
-              jq -nc --argjson vsa "$vsa" --argjson refs "$refs" --arg d "${digest#sha256:}" '{
-                vsa: $vsa,
-                expect_digest: $d,
-                sbom_referrers:    ([$refs.manifests[] | select(.artifactType == "application/vnd.cyclonedx+json")] | length),
-                verdict_referrers: ([$refs.manifests[] | select(.artifactType == "application/vnd.cv-oci.cve-verdict.v1+json")] | length)
-              }'
+        - command:
+            entrypoint: ./emit-and-fetch-vsa.sh
             outputs:
               - name: r
                 value: (json_parse($stdout))
@@ -330,20 +166,8 @@ spec:
 
     - name: vsa-does-not-verify-under-a-foreign-key
       try:
-        - script:
-            content: |
-              set -eu
-              zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-              img=$(kubectl -n cv-pipeline get deploy cv \
-                -o jsonpath='{.spec.template.spec.containers[0].image}')
-              ref="${zot}/cv@${img##*@}"
-              fk=$(mktemp -d)
-              ( cd "$fk" && COSIGN_PASSWORD="" cosign generate-key-pair >/dev/null )
-              rc=0
-              cosign verify-attestation --key "$fk/cosign.pub" --insecure-ignore-tlog=true \
-                --allow-insecure-registry --type "https://slsa.dev/verification_summary/v1" \
-                "$ref" >/dev/null 2>&1 || rc=$?
-              jq -nc --argjson rc "$rc" '{verify_rc: $rc}'
+        - command:
+            entrypoint: ./verify-vsa-with-foreign-key.sh
             outputs:
               - name: neg
                 value: (json_parse($stdout))
@@ -351,9 +175,5 @@ spec:
             resource:
               ($neg.verify_rc != `0`): true
   catch:
-    - script:
-        content: |
-          zot="${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}"
-          img=$(kubectl -n cv-pipeline get deploy cv \
-            -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
-          [ -n "$img" ] && oras discover --insecure --format tree "${zot}/cv@${img##*@}" 2>/dev/null || true
+    - command:
+        entrypoint: ./dump-referrers.sh

@@ -199,6 +199,13 @@ spec:
         - command:
             entrypoint: ./push-tampered-artifact.sh
             timeout: 6m
+            outputs:
+              - name: t
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              ($t.seen_verification_failure): true
+              ($t.revision_unchanged): true
   catch:
     - describe:
         apiVersion: source.toolkit.fluxcd.io/v1

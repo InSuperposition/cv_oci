@@ -888,7 +888,7 @@ slice. Ties into the two "convert to Timoni modules" TODOs.
 
 #### Slice 6 — SLSA Build L3 + provenance verification + a signed VSA
 
-**Shipped 2026-09-03** on `slice-6-provenance-verified` (`tests/reconstruction-verified/`).
+**Shipped 2026-09-04** — PR #4 (merge `147d53a`), `tests/reconstruction-verified/`.
 
 Eng review (2026-09-03) walked the original `reconstruct.sh` capstone down. A
 full rebuild-and-compare on the *same single-actor cluster it verifies* is

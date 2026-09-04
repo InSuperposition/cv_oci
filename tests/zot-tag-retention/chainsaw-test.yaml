@@ -33,17 +33,41 @@ spec:
       try:
         - command:
             entrypoint: ./read-zot-retention-policy.sh
+            outputs:
+              - name: p
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              ($p.loaded): true
+              ($p.matches_shape): true
 
     - name: pushedWithin-evicts-aged-tags-keeps-fresh-and-spares-unmatched-repos
       try:
         - command:
             entrypoint: ./probe-retention-eviction.sh
             timeout: 3m
+            outputs:
+              - name: e
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              (length($e.aged)): 0
+              (contains($e.fresh, 'v1')): true
+              (contains($e.unmatched, 'v1')): true
+              ($e.delete_logged): true
 
     - name: the-live-policy-does-not-touch-cv-cv-frontend-or-timoni
       try:
         - command:
             entrypoint: ./list-protected-repo-tags.sh
+            outputs:
+              - name: t
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              (length($t.cv[?contains(@, 'git-')]) > `0`): true
+              (length($t.cv_frontend) > `0`): true
+              (length($t.timoni) > `0`): true
   catch:
     - command:
         entrypoint: ./dump-retention-state.sh

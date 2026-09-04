@@ -7,9 +7,10 @@
 # registry), pushes three tiny tags, waits one GC pass, and inspects what
 # survived. No Kubernetes involved.
 #
-# T8a asserts in-script. T8b prints
 #   {"aged":[...],"fresh":[...],"unmatched":[...],"delete_logged":bool}
-# and a chainsaw assert: tree takes over.
+#
+# A chainsaw assert: tree checks: aged is empty, fresh contains "v1", unmatched
+# contains "v1", and a retention "delete" decision was logged for evict-aged.
 set -euo pipefail
 
 _here=$(cd "$(dirname "$0")" && pwd)
@@ -73,18 +74,26 @@ mk unmatched-repo:v1 "unmatched-$(date +%s%N)"
 # window is 5s, gc interval 8s — one pass after ~15s has aged evict-aged out
 sleep 20
 
-aged=$(crane ls "${r}/evict-aged" 2>/dev/null | tr '\n' ' ' || true)
-fresh=$(crane ls "${r}/keep-fresh" 2>/dev/null | tr '\n' ' ' || true)
-unm=$(crane ls "${r}/unmatched-repo" 2>/dev/null | tr '\n' ' ' || true)
-echo "after pass: evict-aged=[$aged] keep-fresh=[$fresh] unmatched-repo=[$unm]"
+repo_tags() {
+	# A fully-evicted repo (evict-aged, once its only tag ages out) can 404 on
+	# `crane ls` — that IS the expected "aged" outcome, not a script error.
+	# `crane`'s own exit code is neutralized BEFORE the jq pipe so a 404 can't
+	# poison it under `pipefail` (that previously produced a doubled "[]\n[]").
+	local out
+	out=$(crane ls "${r}/$1" 2>/dev/null || true)
+	printf '%s' "$out" | jq -R . | jq -sc '[.[] | select(length > 0)]'
+}
+aged=$(repo_tags evict-aged)
+fresh=$(repo_tags keep-fresh)
+unmatched=$(repo_tags unmatched-repo)
 
-[ -z "$(printf '%s' "$aged" | tr -d '[:space:]')" ] \
-	|| { echo "FAIL: aged tag was NOT evicted (evict-aged=[$aged])" >&2; exit 1; }
-printf '%s' "$fresh" | grep -qw v1 \
-	|| { echo "FAIL: in-window tag keep-fresh:v1 was evicted" >&2; exit 1; }
-printf '%s' "$unm" | grep -qw v1 \
-	|| { echo "FAIL: unmatched-repo:v1 was evicted (no policy should have matched it)" >&2; exit 1; }
+delete_logged=false
+if docker logs "$cname" 2>&1 | grep '"module":"retention"' \
+	| jq -e 'select(.repository == "evict-aged" and .decision == "delete")' >/dev/null 2>&1; then
+	delete_logged=true
+fi
 
-docker logs "$cname" 2>&1 | grep '"module":"retention"' \
-	| jq -e 'select(.repository == "evict-aged" and .decision == "delete")' >/dev/null \
-	|| { echo "FAIL: no retention delete decision logged for evict-aged" >&2; exit 1; }
+jq -nc \
+	--argjson aged "$aged" --argjson fresh "$fresh" --argjson unmatched "$unmatched" \
+	--argjson delete_logged "$delete_logged" \
+	'{aged:$aged, fresh:$fresh, unmatched:$unmatched, delete_logged:$delete_logged}'

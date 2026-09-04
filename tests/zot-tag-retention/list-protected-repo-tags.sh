@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# list-protected-repo-tags.sh — guard that the live retention policy's globs
-# leave cv / cv-frontend / timoni untouched (they match no throwaway-repo
-# pattern, so retention must skip them entirely).
+# list-protected-repo-tags.sh — print the tags on cv / cv-frontend / timoni.
+# The live retention policy's globs must leave them untouched (they match no
+# throwaway-repo pattern, so retention skips them entirely).
 #
-# T8a asserts in-script. T8b prints
 #   {"cv":["git-...",...],"cv_frontend":[...],"timoni":[...]}
-# and a chainsaw assert: tree takes over.
+#
+# A chainsaw assert: tree checks: cv still has a git-<sha> tag; cv-frontend and
+# timoni each have at least one tag.
 set -euo pipefail
 
 _here=$(cd "$(dirname "$0")" && pwd)
@@ -13,11 +14,14 @@ _here=$(cd "$(dirname "$0")" && pwd)
 . "$_here/../_resources/lib.sh"
 zot=$(cv_zot)
 
-cv=$(crane ls --insecure "${zot}/cv" 2>/dev/null | tr '\n' ' ')
-fe=$(crane ls --insecure "${zot}/cv-frontend" 2>/dev/null | tr '\n' ' ')
-tm=$(crane ls --insecure "${zot}/timoni" 2>/dev/null | tr '\n' ' ')
-echo "cv=[$cv] cv-frontend=[$fe] timoni=[$tm]"
+tags() {
+	local out
+	out=$(crane ls --insecure "${zot}/$1" 2>/dev/null || true)
+	printf '%s' "$out" | jq -R . | jq -sc '[.[] | select(length > 0)]'
+}
 
-printf '%s' "$cv" | grep -q 'git-' || { echo "FAIL: cv lost its git-<sha> tag" >&2; exit 1; }
-[ -n "$(printf '%s' "$fe" | tr -d '[:space:]')" ] || { echo "FAIL: cv-frontend has no tags" >&2; exit 1; }
-[ -n "$(printf '%s' "$tm" | tr -d '[:space:]')" ] || { echo "FAIL: timoni has no tags" >&2; exit 1; }
+jq -nc \
+	--argjson cv "$(tags cv)" \
+	--argjson fe "$(tags cv-frontend)" \
+	--argjson tm "$(tags timoni)" \
+	'{cv:$cv, cv_frontend:$fe, timoni:$tm}'

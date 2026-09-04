@@ -52,6 +52,13 @@ spec:
             env:
               - name: NS
                 value: ($namespace)
+            outputs:
+              - name: f
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              (length($f.fetch_reason) > `0`): true
+              ($f.fetch_reason != 'Succeeded'): true
         - error:
             resource:
               apiVersion: tekton.dev/v1

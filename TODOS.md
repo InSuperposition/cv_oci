@@ -5,6 +5,42 @@ triggers) — this is new work not yet scheduled into a slice.
 
 ## P2
 
+### Planning session — declarative-first + extract all inline shell from config
+- **What:** a `/plan-eng-review`-gated planning session covering the whole
+  repo's scripts and test-embedded shell. Two goals:
+  1. **No shell inside config YAML** (a hard rule as of 2026-09-04). Extract
+     every inline `script:` in `tests/*/chainsaw-test.yaml`
+     (`pipeline-acceptance`, `deploy-via-flux`, `zot-tag-retention`,
+     `pipeline-rejects-*`, `pipeline-rbac-templating`, `cve-gate-*`,
+     `build-is-reproducible`) into named `.sh` files — IDE syntax highlighting,
+     `shellcheck -x`, and `bats` coverage all need real files. Chainsaw calls
+     them via `command: { entrypoint: ./<name>.sh }`; comparisons stay in
+     `assert:` (kyverno-json) trees. `tests/reconstruction-verified/` is the
+     reference shape (lib.sh + one script per data-gathering job).
+  2. **Every script functional, composable, reusable, conceptually isolated,
+     easily tested** — one job per file, shared helpers in a `lib.sh`, no
+     hidden coupling, pure where possible, a `bats` case per script.
+- **Declarative-first (do this BEFORE writing shell):** for each extracted
+  block, check whether a tool — **in the stack or not** — does it
+  declaratively. Where an out-of-stack tool fits, the planning session
+  presents it as an option with tradeoffs; **the user decides whether it
+  enters the stack.** Known candidates to weigh: Flux `OCIRepository` for
+  fetch+cosign-verify (already in stack); `crane`/`oras` config files;
+  `cue`/`timoni` for anything YAML-shaped; a policy engine for JSON assertions
+  (`conftest`/OPA, kyverno CEL `ValidatingPolicy`) vs Chainsaw's embedded
+  kyverno-json.
+- **Why:** the Slice 5a "retire the bash harness for Chainsaw" mandate moved
+  orchestration into YAML but carried the shell along inside `script:` blocks.
+  This finishes the job — declarative config, testable code.
+- **Context:** Slice 6 PR #4 established the pattern
+  (`tests/reconstruction-verified/`, decision `04249b46`). `bats` is currently
+  only wired for `scripts/test/*.bats`; the pre-commit shellcheck glob was
+  widened to `tests/**/*.sh` in the same PR.
+- **Effort:** L (human, ~1–2 days) / M (CC). Its own branch, not folded into a
+  feature slice.
+- **Depends on:** nothing; every existing suite is green, so this is a
+  behaviour-preserving refactor.
+
 ### Tighten or retire `cv-deploy-role`
 - **What:** the `deploy` task no longer `kubectl apply`s (5c-A — Flux
   reconciles). `cv-deploy-role` still grants Deployment/Service write from the

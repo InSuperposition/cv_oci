@@ -291,7 +291,7 @@ delete them when this merge lands.**
 | Slice 5 (amd64 + multi-arch index) | **dropped** | Non-goal (Q2). Single platform digest is the release identity. Reference → non-goals. |
 | Slice 6 (promotion + zot authz) | **folded into Slice 5 (GitOps)** | Promotion moves an OCI tag onto a signed manifest artifact — no script, no authz. htpasswd + `dockerconfig` wiring land with the Flux pull credential. |
 | Slice 7 (Timoni + Flux GitOps) | **re-spec'd, renumbered Slice 5** (P5 + tooling mandates 2026-09-02) | App deploy only. Manifest generation = a reusable Timoni module `modules/web-app/`; `deploy` renders it and `flux push artifact`s to zot; the artifact is signed (probe-gated: Chains async or a dedicated `cv-sign-sa`); Flux `OCIRepository` (`ref.semver`) + `spec.verify: {provider: cosign}` gates the reconcile. **No `cv_gitops` git repo** (P5: `GitRepository.spec.verify` = PGP/SSH commit sigs only). Provisioning = `cv_oci/tofu/` (OpenTofu; `bootstrap.sh` frozen). Test harness ported to Chainsaw, bash scripts deleted. 3 commits: 5a Chainsaw, 5b module, 5c tofu+Flux. |
-| Slice 6 — **re-spec'd 2026-09-03** | **scoped below** | SLSA Build L3 (held via Chains) + a committed CUE/Rego policy over the deployed image's provenance + a re-derived-artifact cross-check + a signed VSA referrer. No script, no rebuild Pipeline. The `reconstruct.sh` "reconstruction capstone" was cut — illusory zero-trust on a single-actor cluster — and retired to a multi-actor design note. |
+| Slice 6 — **re-spec'd 2026-09-03** | **scoped below** | SLSA Build L3 (held via Chains) + a signature-verified provenance-content assertion over the deployed image (`cosign verify-attestation` + declarative Chainsaw `assert:` trees, no policy language — P15) + a re-derived-artifact cross-check + a signed VSA referrer. No script, no rebuild Pipeline. The `reconstruct.sh` "reconstruction capstone" was cut — illusory zero-trust on a single-actor cluster — and retired to a multi-actor design note. |
 | OpenBao slice | **standalone `cv_openbao` repo** (eng review 2026-09-02) | Was going to fold in as "4b"; the outside voice was right that it is the least-original, most-stateful item and it gates the distinctive Slices 5–6. Own repo, like `cv_packs`. cv_oci keeps x509 signing + the debt row. Research (raft, static seal, `hashivault://` + OIDC/JWT) captured in the §`cv_openbao` block below. |
 | `plan/` reference (rules, glossary, test layers) | **merged below** | "Reference" section, CNB-updated. Crane/apko-era layers + the NetworkPolicy + the multi-run verify design dropped. |
 
@@ -312,7 +312,7 @@ property to every artifact in the chain: image, SBOM, CVE verdict, provenance,
 deployed manifest are each a **deterministic function of `cv_frontend@SHA` + the
 pinned toolchain** (`digests.cue`). Verification is layered: Chains signs
 (SLSA Build L3), Flux `OCIRepository.spec.verify` gates the reconcile on that
-signature, and Slice 6 adds a declarative CUE/Rego policy over the provenance
+signature, and Slice 6 adds a signature-verified provenance-content assertion
 plus a re-derived-artifact cross-check and a signed VSA. This combines legacy
 reproducible-build practice (Nix / Debian / `SOURCE_DATE_EPOCH` /
 content-addressed storage) with modern supply-chain tooling (SLSA, sigstore, the
@@ -329,10 +329,10 @@ Consequences for the slice specs:
   "verify a signature you didn't produce" — on this cluster the pipeline *is* the
   deployer, so that machinery is negative space. Verification happens at exactly
   one in-path boundary (Flux `OCIRepository.spec.verify` cosign-gating the
-  manifest artifact, Slice 5) plus the out-of-path Slice 6 policy + cross-check.
+  manifest artifact, Slice 5) plus the out-of-path Slice 6 provenance-content assertion + cross-check.
   The prior "Flux `spec.verify` is insufficient" argument (replan findings
   21–23) is answered: `spec.verify` on an OCI source checks the manifest-artifact
-  signature; the Slice 6 policy covers what it can't (the provenance says the
+  signature; the Slice 6 provenance-content assertion covers what it can't (the provenance says the
   right source SHA + builder digests).
 - **CM-2-A stands** — Slice 4 signs with a cosign key in a K8s Secret; OpenBao is
   a separate arc, **not a planned slice** (finding H: the trust-root cutover
@@ -636,6 +636,14 @@ below.
 (commit `8f2dfa2`) found the port leaned on `script:` shell for ~60% of its
 checks. The user's direction: **declarative config is a project goal; use the
 stack to eliminate scripts** — but not by adding tools.
+
+> **Rule (hardened 2026-09-04, Slice 6): no shell embedded in config YAML,
+> ever.** Check for a declarative tool first (in the stack or not — the user
+> decides what enters the stack). Any shell that remains goes in its own
+> named, `shellcheck`'d, `bats`-able file, called from the YAML via
+> `command: {entrypoint: …}`. `tests/reconstruction-verified/` is the
+> reference shape; the other suites are owed the same (`TODOS.md`
+> "declarative-first + extract all inline shell").
 - **`scripts/gen-digests.sh` → `digests_tool.cue`** (decision `f059f419`): a CUE
   `_tool.cue` workflow (`cue cmd gen`, `tool/file.Create`, zero shell) fans
   `digests.cue` out to `digests.env`, `params.yaml`, `tests/digests.json`
@@ -732,7 +740,8 @@ on a healthy OrbStack (checkpoint: `orb restart` first).
     (PR #2). Ships before Slice 6 — Slice 6 verification needs a stable
     deployed-tag substrate.
 
-6   SLSA Build L3 + a CUE/Rego provenance policy + a re-derived-artifact
+6   SLSA Build L3 + a signature-verified provenance-content assertion
+    (cosign verify-attestation + declarative Chainsaw assert trees) + a re-derived-artifact
     cross-check + a signed VSA referrer. No script.
 ```
 
@@ -877,7 +886,9 @@ everything downstream. Deferred because each adoption must stay bisect-green and
 the blast radius (a Flux misconfig then breaks zot/Chains too) wants its own
 slice. Ties into the two "convert to Timoni modules" TODOs.
 
-#### Slice 6 — SLSA Build L3 + declarative policy verification + a VSA
+#### Slice 6 — SLSA Build L3 + provenance verification + a signed VSA
+
+**Shipped 2026-09-03** on `slice-6-provenance-verified` (`tests/reconstruction-verified/`).
 
 Eng review (2026-09-03) walked the original `reconstruct.sh` capstone down. A
 full rebuild-and-compare on the *same single-actor cluster it verifies* is
@@ -886,36 +897,57 @@ illusory zero-trust; `spec.verify` (live, 5c-A) + deploy-by-digest +
 track caps at **L3** — there is no L4. So Slice 6 is a strong, conventional
 posture, honestly labeled, not an over-engineered capstone. **No script, no
 rebuild Pipeline, no "reconstruction" thesis.** Plan file:
-`tensor-main-design-20260903-slice6.md` (eng-cleared, probes P15–P17).
+`tensor-main-design-20260903-slice6.md` (eng-cleared, probes P15–P17 all run).
 
-- **A committed CUE (or Rego — P15) policy** pins what the deployed `cv` image's
-  Chains SLSA provenance must say: `subject == D`; `resolvedDependencies`
-  contains the `cnbBuilder` + `cnbRunImage` digests from `digests.cue`;
-  `externalParameters` names `cv_frontend@SHA`; `buildType` is the SLSA v2 URI.
-  `cosign verify-attestation --type slsaprovenance1 --policy` enforces it. A
-  Chainsaw suite runs it on the fixture (pass) and against a wrong-digest
-  variant (fail, named mismatch).
+- **A provenance-content assertion** (declarative — P15) pins what the deployed
+  `cv` image's Chains SLSA provenance must say: `subject == D`;
+  `resolvedDependencies` contains the `cnbBuilder` + `cnbRunImage` digests from
+  `digests.cue`; `externalParameters` names `cv_frontend@SHA`; `buildType` is
+  the SLSA v2 URI. `cosign verify-attestation --type slsaprovenance1` verifies
+  the signature; a Chainsaw `script:` step decodes the predicate into a binding
+  and a **Chainsaw `assert:` tree** (kyverno-json) carries the checks —
+  `resolvedDependencies[?digest.sha256 == $builder]`, `subject[0].digest.sha256`,
+  etc. No `--policy` file (CUE can't do list-membership under cosign's
+  Unify-then-Validate harness; Rego and the dead `kyverno-json` CLI would be new
+  dependencies — P15). Runs on the fixture (pass) and, in the same step, against
+  the set with a member removed (assert fails → the check would catch a gap).
 - **A re-derived-artifact cross-check** (`tests/reconstruction-verified/`):
   re-derive the SBOM component set (`trivy image … --format cyclonedx`,
   normalized — P17), the CVE verdict (`trivy` at the `digests.cue` `trivyDb`
   digest), and the rendered manifest (`timoni build` at the pinned module
   version — P13) and assert each matches the deployed referrer. Framed as "the
   published artifacts are internally consistent", **not** "reconstruction".
-- **A signed VSA** (P16) as an OCI referrer on the deployed digest on all-pass:
-  `verificationResult: PASSED`, `slsaResult: SLSA_BUILD_LEVEL_3`, naming the
-  policy. Self-issued on a single-actor cluster — stated plainly; audience is a
-  `kind` CI run and a portfolio reviewer.
-- Runs on a declarative k8s `CronJob` and on demand.
+- **A signed VSA** (P16) as an OCI referrer on the deployed digest, emitted
+  once every check above passes: `predicateType
+  https://slsa.dev/verification_summary/v1`, `verificationResult: PASSED`,
+  `verifiedLevels: [SLSA_BUILD_LEVEL_3]`, subject = the deployed digest.
+  Self-issued with the Chains key on this single-actor cluster — stated
+  plainly (`docs/debt.md`); audience is a `kind` CI run and a portfolio
+  reviewer. Appended, not `--replace`'d, so VSA referrers accumulate like the
+  Chains-side ones. (P16: cosign 3.x needs both `--tlog-upload=false` and
+  `--use-signing-config=false` to stay off the public Rekor log, and a
+  `k8s://` key ref does not honour that pair — the step pulls
+  `signing-secrets/cosign.key` to a file.)
+- Runs **on demand** via `chainsaw test --config tests/.chainsaw.yaml
+  tests/reconstruction-verified/`. **No scheduled `CronJob`** — on a solo
+  ephemeral OrbStack cluster it would fire never, and it would need a standing
+  cross-namespace `signing-secrets` reader that `manifests/rbac.yaml` grants
+  nobody. Continuous re-verification is meaningful only on an always-on
+  deployment with an independent verifier — it belongs to the multi-actor
+  upgrade note below, alongside full reconstruction. Between deploys the
+  running image is already pinned: Flux `spec.verify` re-checks the signature
+  every reconcile, and deploy-by-digest means it cannot silently move.
 
 Full rebuild-and-compare reconstruction is retired to a **"multi-actor /
 real-prod" design note** (below), not a TODO — it becomes worth building only
 when a separate actor runs the build or an external consumer needs the artifact.
 
-**Acceptance:** the policy step exits 0 on the real deployed provenance and
-non-zero (named mismatch) on a wrong pinned digest; each cross-check matches its
-deployed referrer and each has a negative case that fails with a named cause;
-the VSA referrer plus the three Chains referrers are all discoverable on the
-deployed digest.
+**Acceptance (met):** the provenance `assert:` tree passes on the real deployed
+provenance and fails on a wrong pinned digest; each
+cross-check (SBOM set / CVE verdict / rendered manifest) matches its deployed
+referrer and each has a negative that fails with a named cause; the VSA
+verifies, names the deployed digest, and coexists with the three Chains
+referrers; a foreign key does not verify it. Full suite: 11/11 steps, ~200s.
 
 **Multi-actor upgrade note (deferred, not a TODO).** Full rebuild-and-compare
 reconstruction — a verifier that, given only `cv_frontend@SHA` + `digests.cue`,
@@ -925,9 +957,17 @@ model changes: a *separate* actor runs the build (so "rebuild on the same
 cluster" stops being circular), or an external consumer needs to verify the
 artifact without trusting this pipeline. Until then it is motion:
 `build-is-reproducible` already proves determinism, `spec.verify` gates the
-in-path signature, and the Slice 6 policy checks the provenance content. The
+in-path signature, and the Slice 6 `assert:` tree checks the provenance content. The
 accepted single-actor gap — "Chains signs a truthful-looking lie about the
 builder" — is a `debt.md` row with the same upgrade trigger.
+
+A **scheduled re-verification** (a `CronJob` that re-runs
+`tests/reconstruction-verified` and re-issues the VSA on a timer) belongs to
+the same upgrade: on a solo ephemeral cluster it fires never, it needs a
+standing cross-namespace `signing-secrets` reader the RBAC grants nobody, and
+between deploys the image is already pinned by digest with `spec.verify`
+re-checking every reconcile. It becomes worth it on an always-on deployment
+with an independent verifier — where the VSA also stops being self-issued.
 
 #### Probes still open (run before the slice each gates)
 
@@ -947,9 +987,16 @@ builder" — is a `debt.md` row with the same upgrade trigger.
 | **P7** | Flagger meshless (`provider: kubernetes`) — metric signal without a mesh? | a possible progressive-delivery slice, not yet planned | open |
 | **P14** | zot `http.accessControl` tag immutability — does an exact repo key beat `**`? does `PUT` to an existing tag get refused with no auth backend? | Slice 7 (immutability half) | **RESOLVED (2026-09-03) — mechanism works, adoption DEFERRED.** Exact `cv-frontend` key overrides the `**` wildcard; anon `PUT` to an existing tag → `UNAUTHORIZED: authentication required` (401-class, not 403); `create` + `delete` still allowed. But on an anonymous-only registry this is a coarse ACL over the pipeline too. → immutability → TODOS, gated on the Kyverno slice. |
 | **P14b** | zot `storage.retention` — does eviction fire, on what trigger? does `deleteUntagged: false` spare an orphaned-but-referenced manifest? off-pattern tags? `:latest` carve-out? are unmatched repos safe? | Slice 7 (retention half) | **RESOLVED (2026-09-03).** Eviction fires per-repo inside each GC pass (`GCInterval`, default 1h), `Delay: 0`; logs one `"module":"retention"` line per tag (`decision` `keep`/`delete` + `reason`). `deleteUntagged: false` does **NOT** gate a tag overwrite — the deref is inline in the manifest-PUT path (gate failed → Slice 7 reduced to stale-repo retention only). Off-pattern tags in a matched repo → deleted (`"didn't meet any tag 'patterns' rules"`). **No `:latest` carve-out.** Repos matching no policy are skipped entirely (verified: `cv` / `cv-frontend` / `timoni` untouched). |
-| **P15** | Can `cosign verify-attestation`'s `--policy` engine express "`resolvedDependencies` **contains** an entry with `digest.sha256 == <X>`"? CUE unification is positional/order-sensitive; list-membership needs a comprehension. | Slice 6 (the policy) | open — fallback: a **Rego** `--policy` (list iteration is trivial), or parse the predicate with `jq` in a Chainsaw `script:` step and assert via the assertion tree. One will work. |
-| **P16** | `cosign attest --type <VSA> --predicate` on the `cv` digest — coexists with the Chains provenance + SBOM + verdict referrers, or does one `--replace`? Predicate type URI (`https://slsa.dev/verification_summary/v1`) vs `--type custom`? | Slice 6 (the VSA) | open — fallback: emit the VSA as a workspace file + a Chainsaw assertion only; VSA-as-referrer → follow-up TODO. |
-| **P17** | Is `trivy image --format cyclonedx` component-set stable for a fixed image digest across runs (ignoring the random `serialNumber` + timestamp)? | Slice 6 (SBOM cross-check) | open — the design already compares the normalized set (`jq '[.components[]\|{name,version,purl}]\|sort'`), P17 just confirms the set itself is stable. |
+| **P15** | How to express, declaratively, "the deployed image's SLSA provenance says `resolvedDependencies` **contains** an entry with `digest.sha256 == <X>`" — plus the other content checks and the artifact cross-checks? | Slice 6 (the provenance assertion + cross-checks) | **RESOLVED (2026-09-03 / 2026-09-04) — Chainsaw `assert:` (kyverno-json) trees.** `cosign verify-attestation --policy` was probed first and rejected: CUE **cannot** do list-membership (cosign does `policy.Unify(payload).Validate()`; a comprehension binds against the empty policy stub before unification and never re-runs — `list.Contains` always false, 4 variants); Rego **works** but adds a policy language for one repo. A standalone `kyverno-json` CLI is unmaintained (last release v0.0.3, 2024-05) and `kyverno json scan` was **removed** from the kyverno CLI in v1.19 (2025-08). **The kyverno-json assertion-tree engine lives on embedded in Chainsaw**, which the suite already runs. So: `cosign verify-attestation` for the signature, then every comparison is an `assert:` tree — `length($x.deployed[?@ != $fresh]) == 0` for the SBOM set, `resolvedDependencies[?digest.sha256 == $builder]` for provenance, `$m.fresh == $m.deployed` for the manifest. **No shell in the test YAML** — each data-gathering step runs one named,
+executable, `shellcheck`'d script from `tests/reconstruction-verified/` via
+`command: {entrypoint: ./<name>.sh}` (`lib.sh` holds the shared fetch
+helpers); preflight is pure Chainsaw resource assertions. Negatives mutate the
+fetched value in-tree (`$fresh[1:]`, `replace_all(…)`). Note:
+`to_string()`-comparing 620-element arrays pinned the engine for 25 min — use
+**structural** `==` / `!=`. The same extraction is owed for the other suites
+(`TODOS.md` "declarative-first + extract all inline shell"). |
+| **P16** | `cosign attest --type <VSA> --predicate` on the `cv` digest — coexists with the Chains provenance + SBOM + verdict referrers, or does one `--replace`? Predicate type URI (`https://slsa.dev/verification_summary/v1`) vs `--type custom`? | Slice 6 (the VSA) | **RESOLVED (ran live 2026-09-03).** `--type` takes a predicate type **or a URI** → `--type https://slsa.dev/verification_summary/v1`, no `--type custom`. **Default appends** (2× attest → 2 referrers); `--replace` filters by predicateType, so it would leave the Chains provenance alone. Coexistence confirmed on the live `cv@D`: SBOM + verdict referrers untouched, the Chains SLSA provenance still verifies, the VSA is discoverable via `--type <URI>` (filter by **predicateType** — Chains bundles share the `application/vnd.dev.sigstore.bundle.v0.3+json` artifactType). **cosign 3.x tlog gotcha:** `cosign attest` uploads to the public Rekor by default; suppressing it needs **both** `--tlog-upload=false` **and** `--use-signing-config=false`, and a `k8s://` key ref honours neither (pull `cosign.key` to a file). Shipped in `tests/reconstruction-verified/` — VSA emit step + coexistence assertion + a foreign-key negative. |
+| **P17** | Is `trivy image --format cyclonedx` component-set stable for a fixed image digest across runs (ignoring the random `serialNumber` + timestamp)? | Slice 6 (SBOM cross-check) | **RESOLVED (2026-09-03) — stable when normalized.** Two back-to-back scans of the fixed digest: raw bytes **differ** (`serialNumber`, `metadata.timestamp`, every `bom-ref` UUID re-randomised, component array order varies) but `jq '[.components[]\|{name,version,purl}]\|sort'` is **identical** (620 components). Compare that projection; also exclude the `dependencies[]` block (per-run bom-ref adjacency list). Re-derive with the `scan`-task flags exactly (`trivy image --quiet --skip-db-update --format cyclonedx --insecure <ref>`, `pipeline/pipeline.yaml:252`) — no `--pkg-types` / `--scanners`. |
 
 P1/P2/P3 (regctl assembly, `docker load`, zot two-address) are **dead** — the
 crane/apko assembly path they gated no longer exists, and the zot address
@@ -977,7 +1024,7 @@ question was settled by the OrbStack service-DNS finding.
 7. **Every artifact in the chain is a deterministic function of `cv_frontend@SHA`
    + `digests.cue`** — image (Slice 2), SBOM, CVE verdict at a pinned DB (Slice
    3), provenance (Slice 4, probe P8), deployed manifest (Slice 5). Checked by a
-   declarative provenance policy + a re-derived-artifact cross-check (Slice 6),
+   provenance-content assertion + a re-derived-artifact cross-check (Slice 6),
    not only by signature. Fail loudly on any drift.
 8. The pipeline is portable to any conformant **arm64** Kubernetes;
    registry-trust bootstrap is the one documented per-platform node exception
@@ -992,7 +1039,7 @@ question was settled by the OrbStack service-DNS finding.
 | zot NetworkPolicy | Single-node solo cluster, no hostile tenant; every candidate policy risks breaking kubelet pulls / test namespaces / Flux. | any second node, or any multi-tenant scenario |
 | Distroless / minimal run image | Adopting a stock builder means adopting its run image; `heroku` has no distroless variant and a `run-noble-tiny` override failed at export (Q1). | a compatible distroless multi-arch run image exists, or a second node raises the stakes |
 | Standalone promotion slice | Folded into Slice 5 (GitOps). Promotion is an immutable monotonic version tag on an already-signed `cv-frontend` artifact — no script, no pipeline, no candidate/release authz. Every verified build ships (continuous deployment); a `release` semver track + `cosign copy` if a gate is ever wanted. | never (this is the shape) |
-| Separate verify+deploy PipelineRun (CM-1-A) | Superseded. It solved "verify a signature you didn't produce"; on a single-actor cluster that is negative space. Verification = Flux `OCIRepository.spec.verify` (one in-path boundary) + the Slice 6 provenance policy + cross-check (out of path). | a real external consumer of the signed artifact appears |
+| Separate verify+deploy PipelineRun (CM-1-A) | Superseded. It solved "verify a signature you didn't produce"; on a single-actor cluster that is negative space. Verification = Flux `OCIRepository.spec.verify` (one in-path boundary) + the Slice 6 provenance-content assertion + cross-check (out of path). | a real external consumer of the signed artifact appears |
 | Bash for config generation | User mandate (Slice 5 review): manifest / config generation is a Timoni module (`modules/web-app/`), never a heredoc + `sed`/`envsubst`. `bootstrap.sh` is frozen; new provisioning is `cv_oci/tofu/`. | n/a — this is the shape now |
 | OpenBao / transit signing / SOPS / PKI in **cv_oci** | These are `cv_openbao`'s concern — a standalone repo (§`cv_openbao`). cv_oci ships x509 signing + the debt row. Folding a stateful secrets service in front of Slices 5–6 (the distinctive material) is the gold-plating the 2026-09-02 eng review cut. | never in cv_oci; build `cv_openbao` when you want the KMS lesson |
 | SOPS as a tool anywhere | No encrypted secret exists yet. `bootstrap.sh` generates the K8s Secrets it needs (idempotent, only-if-absent). Adding SOPS for zero secrets is negative space. | a Flux source grows a real encrypted value → `cv_openbao`'s Flux-SOPS-via-transit |
@@ -1015,16 +1062,16 @@ question was settled by the OrbStack service-DNS finding.
 - **Tekton Chains** owns automated trust evidence: signing, PipelineRun SLSA
   provenance, OCI referrer storage. PipelineRun-level, async, observe-only-safe.
 - **cosign** is a verify/debug CLI — Flux `OCIRepository.spec.verify`, the
-  Slice 6 `verify-attestation --policy` + VSA `attest`, operators. Not in build
-  steps where Chains already signs (unless P11 forces an explicit `cosign sign`
-  in `deploy` — debt row).
+  Slice 6 `verify-attestation` (signature) + VSA `attest`, operators. Not in
+  build steps where Chains already signs (unless P11 forces an explicit
+  `cosign sign` in `deploy` — debt row).
 - **`crane` / `oras`** are narrow OCI-op CLIs: host-side verification in the test
   scripts, referrer attach (Slice 4). Not in the build path.
-- **Slice 6 verification** is a CUE/Rego policy (`cosign verify-attestation
-  --policy`) over the deployed image's provenance plus a Chainsaw
-  cross-check that re-derives the SBOM set / CVE verdict / rendered manifest
-  from `SHA` + `digests.cue` and asserts each matches its deployed referrer.
-  No script.
+- **Slice 6 verification** is `cosign verify-attestation` (signature) + a
+  declarative Chainsaw `assert:` trees over the deployed image's provenance content, plus
+  a Chainsaw cross-check that re-derives the SBOM set / CVE verdict / rendered
+  manifest from `SHA` + `digests.cue` and asserts each matches its deployed
+  referrer. No script.
 - **Flux** (Slice 5) owns the app's declarative deploy; a signed `cv-frontend`
   OCI artifact in zot (a Timoni `modules/web-app/` render, digest-pinned, no git
   repo) is the source of truth it reconciles via an `OCIRepository`.
@@ -1042,7 +1089,7 @@ question was settled by the OrbStack service-DNS finding.
    lifecycle; orchestration → Tekton; intermediate artifacts → the per-run PVC;
    registry → zot; CVE policy → Trivy; SBOM → the lifecycle; signing + provenance
    → Chains; deploy-time verification → Flux `OCIRepository.spec.verify`;
-   provenance-policy + artifact cross-check → the Slice 6 Chainsaw suite;
+   provenance assertion + artifact cross-check → the Slice 6 Chainsaw suite;
    deploy → Flux (Slice 5).
 2. **Prefer deletion over abstraction.** The pivot is the worked example.
 3. **arm64 only, no QEMU.** Multi-arch is out of scope (Q2). The
@@ -1069,10 +1116,10 @@ question was settled by the OrbStack service-DNS finding.
 13. **Avoid silent fallback.** Fail rather than continue on: build reproducibility
     drift; SBOM layer missing; CVE gate unavailable; CVE verdict irreproducible
     at the pinned DB; signature invalid; provenance absent; built digest ≠ pushed
-    digest; Flux `spec.verify` failure; a Slice 6 policy or cross-check mismatch.
+    digest; Flux `spec.verify` failure; a Slice 6 provenance-assertion or cross-check mismatch.
 14. **Add enforcement only after understanding verification.** manual `cosign
     verify` → Flux `spec.verify` at reconcile (Slice 5) → the Slice 6
-    provenance policy + cross-check as a CronJob → admission control only if ever.
+    provenance assertion + cross-check on demand → admission control only if ever.
 15. **Every new dependency needs an exit test.** What exact problem it solves;
     which existing component can't; what complexity it adds; how it is removed.
 
@@ -1123,7 +1170,7 @@ question was settled by the OrbStack service-DNS finding.
 - **Deployment trust.** Signing is not protection unless the consumer verifies.
   Two layers: Flux `OCIRepository.spec.verify` (`provider: cosign`) gates the
   reconcile on the `cv-frontend` artifact signature (Slice 5c, deploy-time,
-  in-path); the Slice 6 CUE/Rego policy checks the deployed image's provenance
+  in-path); the Slice 6 `assert:` tree checks the deployed image's provenance
   content and the cross-check re-derives the SBOM / verdict / manifest
   (out-of-path). Deploy by digest throughout. **P11a gates whether cosign
   verification is viable at all** against a keyed, no-Rekor, self-signed-TLS
@@ -1187,10 +1234,11 @@ question was settled by the OrbStack service-DNS finding.
     aged tag, keeps an in-window one, and spares a repo matching no policy
     (proven against a throw-away zot with a 5s window); the live policy's globs
     do not match `cv` / `cv-frontend` / `timoni`.
-13. **Slice 6 policy + cross-check** (`tests/reconstruction-verified/`):
-    `cosign verify-attestation --policy` over the deployed image's provenance
-    passes on the real fixture and fails (named mismatch) on a wrong pinned
-    builder digest; the re-derived SBOM component set, CVE verdict, and
+13. **Slice 6 provenance assertion + cross-check** (`tests/reconstruction-verified/`):
+    `cosign verify-attestation` + a declarative `assert:` tree over the deployed
+    image's provenance passes on the real fixture and fails (named mismatch,
+    assert fails) on a wrong pinned builder digest; the re-derived SBOM
+    component set, CVE verdict, and
     `timoni build` render each match their deployed referrer, and each has a
     negative case; the signed VSA plus the three Chains referrers are all
     discoverable on the deployed digest.
@@ -1295,9 +1343,9 @@ per the table above.
 a deterministic function of `cv_frontend@SHA` + `digests.cue` — CVE verdict at a
 pinned DB (Slice 3), content-addressable provenance (Slice 4, probe P8),
 byte-identical `timoni build` of the deployment artifact at the pinned module
-version (Slice 5, probe P13), and a declarative CUE/Rego provenance policy plus a
-re-derived-artifact cross-check and a signed VSA (Slice 6). Each slice lands as
-its own green, bisect-safe commit — Slice 5 as three (5a Chainsaw, 5b module,
+version (Slice 5, probe P13), and a signature-verified provenance-content
+assertion plus a re-derived-artifact cross-check and a signed VSA (Slice 6).
+Each slice lands as its own green, bisect-safe commit — Slice 5 as three (5a Chainsaw, 5b module,
 5c tofu+Flux); Slice 7 (retention) ships before Slice 6.
 
 ## Distribution Plan
@@ -1395,9 +1443,11 @@ is one address (OrbStack service DNS + daemon `insecure-registries`).**
      immutability, then probe P14b showed `deleteUntagged: false` cannot gate an
      overwrite, cutting Slice 7 to stale-repo retention. SHIPPED (PR #2).
    - → **Slice 6** (eng-cleared plan `tensor-main-design-20260903-slice6.md`):
-     SLSA Build L3 + a committed CUE/Rego policy over the deployed image's
-     provenance + a re-derived-artifact cross-check + a signed VSA referrer.
-     No script, no rebuild Pipeline. Probes P15/P16/P17 gate the uncertain
+     SLSA Build L3 + a signature-verified provenance-content assertion (`cosign
+     verify-attestation` + declarative Chainsaw `assert:` trees, no policy
+     language — P15) over
+     the deployed image + a re-derived-artifact cross-check + a signed VSA
+     referrer. No script, no rebuild Pipeline. Probes P15/P16/P17 gate the uncertain
      mechanisms. The `reconstruct.sh` capstone was cut (illusory zero-trust on
      a single-actor cluster) → a multi-actor design note.
 6. **`cv_packs` project** — separate, later, its own design doc.

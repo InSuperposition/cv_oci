@@ -1,0 +1,14 @@
+{
+  "verifier": {
+    "id": "https://github.com/InSuperposition/cv_oci/tree/main/tests/reconstruction-verified"
+  },
+  "timeVerified": "",
+  "resourceUri": "",
+  "policy": {
+    "uri": "https://github.com/InSuperposition/cv_oci/blob/main/tests/reconstruction-verified/chainsaw-test.yaml"
+  },
+  "verificationResult": "PASSED",
+  "verifiedLevels": [
+    "SLSA_BUILD_LEVEL_3"
+  ]
+}

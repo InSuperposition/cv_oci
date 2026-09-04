@@ -1,0 +1,179 @@
+# reconstruction-verified — the deployed cv image is what the pipeline says it is.
+#
+# Runs against the live cluster's deployed `cv` (the digest-pinned image the
+# Flux Kustomization rolled out into cv-pipeline) — not a fresh build.
+#
+# Structure: preflight is pure Chainsaw resource assertions. Every other step
+# runs ONE named script from this directory (data-gathering only — a fetch /
+# derive that prints one JSON object) and carries every comparison in an
+# `assert:` block — a kyverno-json assertion tree evaluated by Chainsaw's
+# embedded engine. No shell in this file; no `jq -e` / `diff` / `[ … ]` in the
+# scripts. Each negative is a second `assert:` in the same step that mutates the
+# fetched value inside the tree (`$x[1:]`, `replace_all(…)`) — no extra fetch.
+#
+# (kyverno-json is the assertion-tree language; the standalone `kyverno-json`
+# CLI is unmaintained and `kyverno json scan` was removed in kyverno v1.19 —
+# the engine lives on inside Chainsaw, which the repo already pins.)
+#
+# Scripts (shellcheck'd via .githooks/pre-commit, bats-able):
+#   lib.sh                          shared fetch helpers
+#   fetch-provenance-predicate.sh   cosign verify-attestation (sig) + decoded statement
+#   prime-pinned-trivy-db.sh        one pinned vuln-DB download into the run cache
+#   derive-sbom-component-sets.sh   fresh trivy CycloneDX set + every deployed referrer's
+#   derive-cve-verdict.sh           fresh scan at the pinned DB + the deployed verdict
+#   render-and-fetch-manifest.sh    fresh `timoni build` + the reconciled artifact
+#   emit-and-fetch-vsa.sh           `cosign attest` the VSA + fetch it back + referrer counts
+#   verify-vsa-with-foreign-key.sh  `cosign verify-attestation` under a throwaway key
+#   dump-referrers.sh               on-failure diagnostic
+#
+# Precondition: a deployed, digest-pinned `cv` Deployment in cv-pipeline with
+# its Chains + SBOM + CVE-verdict referrers, and the flux-system/cv-frontend
+# OCIRepository (i.e. the deploy-via-flux path has run).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: reconstruction-verified
+spec:
+  concurrent: false
+  # These asserts are over deterministic data — a failure is a real failure, not
+  # a not-yet. Bound the poll so a mismatch fails in seconds, not the config's
+  # 25m pipeline-wait ceiling. `exec` stays long for the trivy DB pull + scans.
+  timeouts:
+    assert: 60s
+    exec: 20m
+  steps:
+    - name: preflight-deployed-cv-and-ocirepository
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: cv
+                namespace: cv-pipeline
+              spec:
+                template:
+                  spec:
+                    containers:
+                      - (starts_with(image, 'zot.cv-pipeline.svc.cluster.local:5000/cv@sha256:')): true
+        - assert:
+            resource:
+              apiVersion: source.toolkit.fluxcd.io/v1
+              kind: OCIRepository
+              metadata:
+                name: cv-frontend
+                namespace: flux-system
+              status:
+                (conditions[?type == 'Ready'].status | [0]): "True"
+
+    - name: provenance-content-matches-pinned-inputs
+      try:
+        - command:
+            entrypoint: ./fetch-provenance-predicate.sh
+            outputs:
+              - name: p
+                value: (json_parse($stdout))
+              - name: builder
+                value: (json_parse($stdout).expect.builder)
+              - name: runimg
+                value: (json_parse($stdout).expect.runimg)
+        - assert:
+            resource:
+              ($p.statement.subject[0].digest.sha256): ($p.expect.digest)
+              ($p.statement.predicate.buildDefinition.buildType): "https://tekton.dev/chains/v2/slsa"
+              (length($p.statement.predicate.buildDefinition.resolvedDependencies[?digest.sha256 == $builder]) > `0`): true
+              (length($p.statement.predicate.buildDefinition.resolvedDependencies[?digest.sha256 == $runimg]) > `0`): true
+              (contains($p.statement.predicate.buildDefinition.externalParameters.runSpec.params[?name == 'APP_IMAGE'].value | [0], $p.expect.fixture)): true
+        - assert:
+            # negative — a digest that never built this image must be absent
+            resource:
+              (length($p.statement.predicate.buildDefinition.resolvedDependencies[?digest.sha256 == '0000000000000000000000000000000000000000000000000000000000000000'])): 0
+
+    - name: prime-the-pinned-trivy-db
+      try:
+        - command:
+            entrypoint: ./prime-pinned-trivy-db.sh
+
+    - name: xcheck-sbom-component-set-matches-deployed
+      try:
+        - command:
+            entrypoint: ./derive-sbom-component-sets.sh
+            outputs:
+              - name: x
+                value: (json_parse($stdout))
+              - name: fresh
+                value: (json_parse($stdout).fresh)
+        - assert:
+            resource:
+              # at least one deployed CycloneDX referrer, and every one of them
+              # is the same normalised {name,version,purl} set as a fresh scan
+              (length($x.deployed) > `0`): true
+              (length($x.deployed[?@ != $fresh])): 0
+        - assert:
+            # negative — the same set with one component removed no longer matches
+            resource:
+              ($fresh != $fresh[1:]): true
+
+    - name: xcheck-cve-verdict-consistent-with-a-fresh-scan
+      try:
+        - command:
+            entrypoint: ./derive-cve-verdict.sh
+            outputs:
+              - name: c
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              # deployed verdict is 'pass' and a fresh scan at the pinned DB
+              # agrees: zero fixable CRITICALs in the app image and the run image
+              ($c.deployed_verdict): pass
+              ($c.app_fixable_criticals): 0
+              ($c.run_fixable_criticals): 0
+        - assert:
+            # negative — a clean fresh scan contradicts a 'fail-critical' claim
+            resource:
+              ($c.app_fixable_criticals == `0` && $c.run_fixable_criticals == `0` && 'fail-critical' == 'pass'): false
+
+    - name: xcheck-manifest-matches-deployed-artifact
+      try:
+        - command:
+            entrypoint: ./render-and-fetch-manifest.sh
+            outputs:
+              - name: m
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              ($m.fresh == $m.deployed): true
+        - assert:
+            # negative — mutate one field in the rendered document; it no longer matches
+            resource:
+              "($m.fresh != replace_all($m.fresh, 'replicas: 1', 'replicas: 9'))": true
+
+    - name: vsa-emitted-and-coexists-with-the-chains-referrers
+      try:
+        - command:
+            entrypoint: ./emit-and-fetch-vsa.sh
+            outputs:
+              - name: r
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              ($r.vsa.predicateType): "https://slsa.dev/verification_summary/v1"
+              ($r.vsa.subject[0].digest.sha256): ($r.expect_digest)
+              ($r.vsa.predicate.verificationResult): PASSED
+              (contains($r.vsa.predicate.verifiedLevels, 'SLSA_BUILD_LEVEL_3')): true
+              ($r.sbom_referrers > `0`): true
+              ($r.verdict_referrers > `0`): true
+
+    - name: vsa-does-not-verify-under-a-foreign-key
+      try:
+        - command:
+            entrypoint: ./verify-vsa-with-foreign-key.sh
+            outputs:
+              - name: neg
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              ($neg.verify_rc != `0`): true
+  catch:
+    - command:
+        entrypoint: ./dump-referrers.sh

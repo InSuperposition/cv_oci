@@ -2,7 +2,7 @@
 # Pre-commit hook. Enable with:  git config core.hooksPath .githooks
 #
 # Runs, fast-to-slow:
-#   1. shellcheck on all scripts
+#   1. shellcheck on all scripts (scripts/ + the per-suite tests/**/*.sh helpers)
 #   2. gen-digests drift check (digests.env / params.yaml match digests.cue)
 #   3. cue vet digests.cue
 #   4. kubeconform validation of manifests
@@ -20,7 +20,7 @@ step() { printf '\n[pre-commit] %s\n' "$1"; }
 
 if command -v shellcheck >/dev/null 2>&1; then
 	step "shellcheck"
-	mapfile -t sh < <(git ls-files -- 'scripts/*.sh' 'scripts/**/*.sh' '.githooks/*')
+	mapfile -t sh < <(git ls-files -- 'scripts/*.sh' 'scripts/**/*.sh' 'tests/**/*.sh' '.githooks/*')
 	if [ "${#sh[@]}" -gt 0 ]; then
 		shellcheck -x "${sh[@]}" || fail=1
 	fi

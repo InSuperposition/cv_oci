@@ -70,6 +70,18 @@ else
 	echo "  chainsaw not installed — skipping (docs/bootstrap-toolchain.md; Kyverno Chainsaw, not the forensics tool of the same name)"
 fi
 
+step "no inline shell in chainsaw-test.yaml"
+# Rule (2026-09-04, decision e60c0881): every comparison lives in an assert:
+# tree, every irreducible imperative step is a named tests/**/*.sh script called
+# via command: { entrypoint: ./x.sh }. A script:/content: | block is inline
+# shell that can't be linted, syntax-highlighted, or unit-tested — see
+# tests/reconstruction-verified/ for the reference shape.
+if inline=$(git grep -lE '^\s*(script|content):' -- 'tests/*/chainsaw-test.yaml' 2>/dev/null) && [ -n "$inline" ]; then
+	echo "  inline shell in a chainsaw test — extract it to a named .sh script:"
+	while IFS= read -r f; do printf '    %s\n' "$f"; done <<<"$inline"
+	fail=1
+fi
+
 if command -v bats >/dev/null 2>&1; then
 	step "bats"
 	mapfile -t bats_dirs < <(

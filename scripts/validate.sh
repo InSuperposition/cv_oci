@@ -65,5 +65,17 @@ if grep -RInE '^[[:space:]]*image:[[:space:]]*[^$#"]*[:@]' -- "${files[@]}" 2>/d
 	rc=1
 fi
 
+# No inline shell in the Chainsaw acceptance suite (decision e60c0881): every
+# comparison lives in an assert: tree, every irreducible step is a named
+# tests/**/*.sh script called via command: { entrypoint: ./x.sh }. `tests/` is
+# excluded from the kubeconform pass above (chainsaw.kyverno.io CRDs, not K8s
+# manifests — `chainsaw lint` validates those), so this check is separate.
+if inline=$(git ls-files -- 'tests/*/chainsaw-test.yaml' | xargs grep -lE '^\s*(script|content):' 2>/dev/null) \
+	&& [ -n "$inline" ]; then
+	log_kv level=error step=validate msg="inline shell in a chainsaw test — extract it to a named .sh script"
+	printf '%s\n' "$inline"
+	rc=1
+fi
+
 [ "$rc" -eq 0 ] && log_kv step=validate result=ok manifests="${#files[@]}"
 exit "$rc"

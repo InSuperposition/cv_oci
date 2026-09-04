@@ -1245,7 +1245,16 @@ question was settled by the OrbStack service-DNS finding.
 
 **Test tooling (Slice 5a):** `scripts/test/{e2e,negative,repro}.sh` are ported to
 Chainsaw suites and deleted. Registry / CLI assertions (signed? `cosign verify`?
-anon pull?) live in Chainsaw `script:` leaves.
+anon pull?) started out living in Chainsaw `script:` leaves, then — after that
+inline shell slipped through several review rounds (decision `e60c0881`) — moved
+out again: every suite under `tests/` is now shell-free `chainsaw-test.yaml`
+plus named scripts in `tests/_resources/` or the suite's own directory, called
+via `command: { entrypoint: ./x.sh }`. Comparisons live in Chainsaw `assert:`
+(kyverno-json) trees, never in the shell. `tests/reconstruction-verified/`
+established the pattern (Slice 6); the P2 planning session
+(`TODOS.md`, `chore-extract-inline-test-shell`) extended it to every remaining
+suite. `.githooks/pre-commit` and `scripts/validate.sh` both grep-enforce that
+no `chainsaw-test.yaml` regains a `script:`/`content: |` block.
 
 Retired layers — release-tree tests, workspace-boundary write tests, manual
 OCI-assembly tests, multi-arch index test — described the crane/apko pipeline and

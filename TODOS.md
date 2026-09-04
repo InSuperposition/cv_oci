@@ -5,41 +5,21 @@ triggers) — this is new work not yet scheduled into a slice.
 
 ## P2
 
-### Planning session — declarative-first + extract all inline shell from config
-- **What:** a `/plan-eng-review`-gated planning session covering the whole
-  repo's scripts and test-embedded shell. Two goals:
-  1. **No shell inside config YAML** (a hard rule as of 2026-09-04). Extract
-     every inline `script:` in `tests/*/chainsaw-test.yaml`
-     (`pipeline-acceptance`, `deploy-via-flux`, `zot-tag-retention`,
-     `pipeline-rejects-*`, `pipeline-rbac-templating`, `cve-gate-*`,
-     `build-is-reproducible`) into named `.sh` files — IDE syntax highlighting,
-     `shellcheck -x`, and `bats` coverage all need real files. Chainsaw calls
-     them via `command: { entrypoint: ./<name>.sh }`; comparisons stay in
-     `assert:` (kyverno-json) trees. `tests/reconstruction-verified/` is the
-     reference shape (lib.sh + one script per data-gathering job).
-  2. **Every script functional, composable, reusable, conceptually isolated,
-     easily tested** — one job per file, shared helpers in a `lib.sh`, no
-     hidden coupling, pure where possible, a `bats` case per script.
-- **Declarative-first (do this BEFORE writing shell):** for each extracted
-  block, check whether a tool — **in the stack or not** — does it
-  declaratively. Where an out-of-stack tool fits, the planning session
-  presents it as an option with tradeoffs; **the user decides whether it
-  enters the stack.** Known candidates to weigh: Flux `OCIRepository` for
-  fetch+cosign-verify (already in stack); `crane`/`oras` config files;
-  `cue`/`timoni` for anything YAML-shaped; a policy engine for JSON assertions
-  (`conftest`/OPA, kyverno CEL `ValidatingPolicy`) vs Chainsaw's embedded
-  kyverno-json.
-- **Why:** the Slice 5a "retire the bash harness for Chainsaw" mandate moved
-  orchestration into YAML but carried the shell along inside `script:` blocks.
-  This finishes the job — declarative config, testable code.
-- **Context:** Slice 6 PR #4 established the pattern
-  (`tests/reconstruction-verified/`, decision `04249b46`). `bats` is currently
-  only wired for `scripts/test/*.bats`; the pre-commit shellcheck glob was
-  widened to `tests/**/*.sh` in the same PR.
-- **Effort:** L (human, ~1–2 days) / M (CC). Its own branch, not folded into a
-  feature slice.
-- **Depends on:** nothing; every existing suite is green, so this is a
-  behaviour-preserving refactor.
+### Test-double harness for `tests/_resources/` wrapper scripts
+- **What:** a `bin`-stub PATH shim (fake `kubectl`/`oras`/`cosign`/`crane`
+  recording argv) so thin tool-wrapper scripts — `verify-image-signature.sh`,
+  `fetch-artifact-referrers.sh`, `copy-zot-ca-to-namespace.sh` — can assert
+  their command construction without a cluster.
+- **Why:** the shell-extraction pass (below, shipped) gave every *pure*
+  script (`create-pipelinerun.sh`) a `DRY_RUN`-mode bats case, but a thin
+  wrapper that just shells out to one tool has no such seam — it's covered
+  only by the suite's own live run.
+- **Context:** raised in the eng review for `chore-extract-inline-test-shell`
+  (2026-09-04, codex outside-voice finding #10). Defense in depth: the green
+  suite run already catches real breakage; this would catch a wrong flag or
+  arg order before a live run does.
+- **Effort:** S–M.
+- **Depends on:** nothing.
 
 ### Tighten or retire `cv-deploy-role`
 - **What:** the `deploy` task no longer `kubectl apply`s (5c-A — Flux
@@ -187,21 +167,6 @@ triggers) — this is new work not yet scheduled into a slice.
   path so it does not overwrite an existing tag.
 
 ## P3
-
-### `deploy-via-flux` suite scopes to `.items[0]`, not its own PipelineRun
-- **What:** `pipeline-succeeds-and-publishes-a-signed-artifact` and downstream
-  steps read `pipelinerun -l cv-oci/acceptance-test=deploy-via-flux
-  -o jsonpath='{.items[0]...}'`. PipelineRuns accumulate (fixed `cv-pipeline`
-  namespace, no per-run cleanup), so `.items[0]` can be a *prior* succeeded run
-  — the suite then passes in seconds without waiting for, or asserting against,
-  the run it just created.
-- **Why:** a real regression in the new run would not be caught.
-- **Fix:** capture the created PipelineRun name from `kubectl create -o name`
-  and select on it, or `kubectl delete pipelinerun -l … --field-selector` in a
-  preflight step.
-- **Context:** noticed 2026-09-03 during the Slice 7 T2 verify (the run it
-  spawned, `deploy-via-flux-vbkdq`, did complete + pass when checked directly).
-- **Effort:** S.
 
 ### Rule 15 exit-test scripts
 - **What:** `exit-tests/<component>.md` + a script per component that demonstrates

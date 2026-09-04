@@ -51,6 +51,15 @@ spec:
             env:
               - name: NS
                 value: ($namespace)
+            outputs:
+              - name: r
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              ($r.build): Succeeded
+              (length($r.smoke) > `0`): true
+              ($r.smoke != 'Succeeded'): true
+              ($r.teardown): Succeeded
         - error:
             resource:
               apiVersion: tekton.dev/v1
@@ -73,3 +82,9 @@ spec:
             env:
               - name: NS
                 value: ($namespace)
+            outputs:
+              - name: leak
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              ($leak.leftovers): 0

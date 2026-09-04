@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# read-task-reasons.sh — guard that this run's build / smoke / smoke-teardown
-# TaskRuns ended as the pre-/healthz scenario requires: build Succeeded, smoke
-# NOT Succeeded (no /healthz route), teardown Succeeded.
+# read-task-reasons.sh — print the condition reason of this run's build / smoke
+# / smoke-teardown TaskRuns as JSON. The pre-/healthz commit builds fine but has
+# no /healthz route, so the chainsaw assert: tree checks: build Succeeded, smoke
+# NOT Succeeded, teardown Succeeded.
 #
 #   NS   the namespace the PipelineRun `run` lives in
 #
-# T4a asserts here; T4b makes this print {"build":..,"smoke":..,"teardown":..}
-# and moves the checks to a chainsaw assert: tree.
+#   {"build":"Succeeded","smoke":"Failed","teardown":"Succeeded"}
 set -euo pipefail
 
 : "${NS:?set NS}"
@@ -17,10 +17,8 @@ reason() {
 		-o jsonpath='{.items[0].status.conditions[0].reason}' 2>/dev/null || true
 }
 
-build=$(reason build)
-smoke=$(reason smoke)
-teardown=$(reason smoke-teardown)
-
-[ "$build" = "Succeeded" ] || { echo "build=$build" >&2; exit 1; }
-[ -n "$smoke" ] && [ "$smoke" != "Succeeded" ] || { echo "smoke=$smoke" >&2; exit 1; }
-[ "$teardown" = "Succeeded" ] || { echo "teardown=$teardown" >&2; exit 1; }
+jq -nc \
+	--arg b "$(reason build)" \
+	--arg s "$(reason smoke)" \
+	--arg t "$(reason smoke-teardown)" \
+	'{build: $b, smoke: $s, teardown: $t}'

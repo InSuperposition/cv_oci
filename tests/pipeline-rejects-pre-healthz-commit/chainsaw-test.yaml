@@ -78,7 +78,7 @@ spec:
               metadata:
                 name: cv
         - command:
-            entrypoint: ./count-smoke-leftovers.sh
+            entrypoint: ../_resources/count-smoke-leftovers.sh
             env:
               - name: NS
                 value: ($namespace)

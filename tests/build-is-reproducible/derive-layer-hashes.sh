@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# derive-layer-hashes.sh — the CNB lifecycle's own content-addressed layer
-# hashes for both independent builds:
+# derive-layer-hashes.sh — print the CNB lifecycle's own content-addressed
+# layer hashes for both independent builds as JSON:
 #   - app-layer diffID   io.buildpacks.lifecycle.metadata .app[0].sha
 #   - SBOM-layer diffID  io.buildpacks.lifecycle.metadata .sbom.sha
 # plus the two outer image digests (bonus, non-load-bearing).
 #
 #   NS1   the Chainsaw ephemeral namespace (the second is <NS1>-b)
 #
-# T6a: asserts app1==app2 and sbom1==sbom2 in-script. T6b: prints
 #   {"app1":..,"app2":..,"sbom1":..,"sbom2":..,"ref1":..,"ref2":..}
-# and a chainsaw assert: tree carries the equality.
+#
+# The chainsaw assert: tree checks app1==app2 and sbom1==sbom2.
 set -euo pipefail
 
 : "${NS1:?set NS1}"
@@ -34,10 +34,11 @@ img_of() { # <namespace>
 
 ref1=$(img_of "$NS1")
 ref2=$(img_of "$ns2")
-app1=$(lifecycle_sha "$ref1" '.app[0].sha')
-app2=$(lifecycle_sha "$ref2" '.app[0].sha')
-sbom1=$(lifecycle_sha "$ref1" '.sbom.sha')
-sbom2=$(lifecycle_sha "$ref2" '.sbom.sha')
 
-[ "$app1" = "$app2" ]   || { echo "app-layer content hash differs: $app1 / $app2" >&2; exit 1; }
-[ "$sbom1" = "$sbom2" ] || { echo "SBOM-layer content hash differs: $sbom1 / $sbom2" >&2; exit 1; }
+jq -nc \
+	--arg ref1 "$ref1" --arg ref2 "$ref2" \
+	--arg app1 "$(lifecycle_sha "$ref1" '.app[0].sha')" \
+	--arg app2 "$(lifecycle_sha "$ref2" '.app[0].sha')" \
+	--arg sbom1 "$(lifecycle_sha "$ref1" '.sbom.sha')" \
+	--arg sbom2 "$(lifecycle_sha "$ref2" '.sbom.sha')" \
+	'{ref1:$ref1, ref2:$ref2, app1:$app1, app2:$app2, sbom1:$sbom1, sbom2:$sbom2}'

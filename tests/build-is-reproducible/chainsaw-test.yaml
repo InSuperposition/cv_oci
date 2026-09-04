@@ -78,6 +78,15 @@ spec:
             env:
               - name: NS1
                 value: ($namespace)
+            outputs:
+              - name: h
+                value: (json_parse($stdout))
+        - assert:
+            resource:
+              (length($h.app1) > `0`): true
+              (length($h.sbom1) > `0`): true
+              ($h.app1): ($h.app2)
+              ($h.sbom1): ($h.sbom2)
       finally:
         - delete:
             ref:

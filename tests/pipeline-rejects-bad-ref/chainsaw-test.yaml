@@ -15,55 +15,21 @@ spec:
         # in-script rewrite of manifests/rbac.yaml (`s/cv-pipeline/$NS/` piped to apply).
         - apply:
             file: ../_resources/pipeline-rbac.yaml
-        - script:
+        - apply:
+            file: ../../tasks/buildpacks.yaml
+        - apply:
+            file: ../../pipeline/pipeline.yaml
+        - command:
+            entrypoint: ../_resources/create-pipelinerun.sh
             env:
               - name: NS
                 value: ($namespace)
-            content: |
-              set -eu
-              cd "$(git rev-parse --show-toplevel)"
-              . ./digests.env
-              PIPELINE_REF="$(git rev-parse HEAD)"   # 5b: clone-config pulls modules/ from this SHA (must be pushed)
-              kubectl apply -n "$NS" -f tasks/buildpacks.yaml -f pipeline/pipeline.yaml >/dev/null
-              kubectl -n "$NS" create -f - >/dev/null <<EOF
-              apiVersion: tekton.dev/v1
-              kind: PipelineRun
-              metadata:
-                generateName: bad-ref-
-                labels: { cv-oci/acceptance-test: pipeline-rejects-bad-ref }
-              spec:
-                pipelineRef: { name: cv-build }
-                taskRunTemplate:
-                  serviceAccountName: cv-build-sa
-                  podTemplate:
-                    securityContext: { fsGroup: 1000 }
-                    nodeSelector: { kubernetes.io/arch: arm64 }
-                taskRunSpecs:
-                  - { pipelineTaskName: smoke, serviceAccountName: cv-smoke-sa }
-                  - { pipelineTaskName: smoke-teardown, serviceAccountName: cv-smoke-sa }
-                  - { pipelineTaskName: deploy, serviceAccountName: cv-deploy-sa }
-                params:
-                  - { name: builder-image, value: "docker.io/heroku/builder:24@${CNBBUILDER}" }
-                  - { name: run-image, value: "docker.io/heroku/heroku:24@${CNBRUNIMAGE}" }
-                  - { name: utility-image, value: "docker.io/library/bash@${CNBUTILITYIMAGE}" }
-                  - { name: kubectl-image, value: "docker.io/alpine/k8s:1.31.1@${CNBKUBECTLIMAGE}" }
-                  - { name: git-image, value: "docker.io/alpine/git@${CNBGITIMAGE}" }
-                  - { name: trivy-image, value: "ghcr.io/aquasecurity/trivy@${TRIVYCLI}" }
-                  - { name: oras-image, value: "ghcr.io/oras-project/oras@${ORASCLI}" }
-                  - { name: trivy-db, value: "${TRIVYDB}" }
-                  - { name: frontend-repo, value: "${FRONTEND_REPO}" }
-                  - { name: frontend-ref, value: "no-such-branch-xyz-${NS}" }
-                  - { name: app-repo, value: "${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/${NS}" }
-                  - { name: namespace, value: "${NS}" }
-                  - { name: pipeline-ref, value: "${PIPELINE_REF}" }
-                  - { name: render-image, value: "${CV_ZOT_ADDR:-zot.cv-pipeline.svc.cluster.local:5000}/timoni@${TIMONIIMAGE}" }
-                  - { name: flux-cli-image, value: "ghcr.io/fluxcd/flux-cli@${FLUXCLI}" }
-                workspaces:
-                  - name: shared
-                    volumeClaimTemplate:
-                      spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 3Gi } } }
-                timeouts: { pipeline: 20m }
-              EOF
+              - name: ACCEPTANCE_LABEL
+                value: pipeline-rejects-bad-ref
+              - name: FRONTEND_REF
+                value: no-such-branch-xyz
+              - name: PIPELINE_TIMEOUT
+                value: 20m
 
     - name: pipeline-fails
       try:
@@ -73,23 +39,19 @@ spec:
               apiVersion: tekton.dev/v1
               kind: PipelineRun
               metadata:
-                labels:
-                  cv-oci/acceptance-test: pipeline-rejects-bad-ref
+                name: run
+                namespace: ($namespace)
               status:
                 (conditions[?type == 'Succeeded']):
                   - status: 'False'
 
     - name: fetch-did-not-succeed-and-nothing-downstream-ran
       try:
-        - script:
+        - command:
+            entrypoint: ./read-fetch-taskrun-reason.sh
             env:
               - name: NS
                 value: ($namespace)
-            content: |
-              set -eu
-              reason=$(kubectl -n "$NS" get taskrun -l tekton.dev/pipelineTask=fetch \
-                -o jsonpath='{.items[0].status.conditions[0].reason}')
-              [ -n "$reason" ] && [ "$reason" != "Succeeded" ] || { echo "fetch reason=$reason" >&2; exit 1; }
         - error:
             resource:
               apiVersion: tekton.dev/v1
@@ -97,3 +59,4 @@ spec:
               metadata:
                 labels:
                   tekton.dev/pipelineTask: build
+                  tekton.dev/pipelineRun: run
